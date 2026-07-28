@@ -206,17 +206,32 @@ export const lcmExpandTool = {
 };
 export function registerLcmExpandTool(
   registerToolOrApi:
-    | { registerTool: (definition: unknown, handler: unknown) => unknown }
-    | ((definition: unknown, handler: unknown) => unknown),
-  context?: unknown,
+    | { registerTool: (definition: unknown) => unknown }
+    | ((definition: unknown) => unknown),
+  fallbackContext?: unknown,
 ): unknown {
   const registerTool =
     typeof registerToolOrApi === "function"
       ? registerToolOrApi
       : registerToolOrApi.registerTool.bind(registerToolOrApi);
-  const getContext =
-    context === undefined ? undefined : () => context as ExpandToolContext;
-  return registerTool(lcmExpandTool, createLcmExpandHandler(getContext));
+  const handler = createLcmExpandHandler(
+    (runtimeContext) =>
+      (runtimeContext as ExpandToolContext | undefined) ??
+      (fallbackContext as ExpandToolContext | undefined),
+  );
+  return registerTool({
+    ...lcmExpandTool,
+    async execute(
+      _toolCallId: string,
+      params: unknown,
+      _signal: AbortSignal | undefined,
+      _onUpdate: unknown,
+      runtimeContext: unknown,
+    ) {
+      const text = await handler(params, runtimeContext);
+      return { content: [{ type: "text", text }] };
+    },
+  });
 }
 export const lcmExpandHandler = createLcmExpandHandler();
 export const createLcmExpandTool = createLcmExpandHandler;
