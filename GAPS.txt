@@ -4,10 +4,9 @@ OMP LCM INSPIRED COMPACTION: KNOWN GAP REGISTER
 Scope
 -----
 
-This file records known gaps in the current repository working tree, including
-provider-native replay changes that have not yet been committed, released, or
-installed. It ranks gaps by operational severity. The ordering within a
-severity class is intentional.
+This file records known gaps in the current released implementation. It ranks
+gaps by operational severity. The ordering within a severity class is
+intentional.
 
 Severity definitions
 --------------------
@@ -23,23 +22,6 @@ P3 - Low: maintainability, ergonomics, or observability weakness that does not
 
 P0: RELEASE BLOCKERS
 ====================
-
-GAP-001: The repaired implementation is not released or running
----------------------------------------------------------------
-Current behavior:
-  The compaction-quality and provider-native replay changes exist only in the
-  repository working tree. The marketplace and locally installed plugin still
-  refer to the previously released v0.1.5 code.
-
-Why it matters:
-  Tests against the working tree do not change the behavior of an already
-  running OMP process. Operators could believe replay is active when the loaded
-  extension does not contain it.
-
-Required closure:
-  Review the complete diff, bump the point version, commit and push it, create
-  and push a tag, publish a GitHub release, upgrade the marketplace installation,
-  restart or reload OMP, and verify `/lcm version` from the new process.
 
 GAP-002: No live OpenAI or Codex replay has been proven end to end
 ----------------------------------------------------------------
