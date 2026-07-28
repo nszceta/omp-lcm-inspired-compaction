@@ -4,9 +4,51 @@ Artifact-backed hierarchical compaction for Oh My Pi (OMP). The plugin keeps exa
 
 ## Install and enable
 
-Install this package in an OMP plugin environment, then enable `omp-lcm-inspired-compaction` using OMP's normal plugin manager. The package supports OMP 17.1.8 and uses only published OMP extension APIs.
+For automatic marketplace updates, add this repository as a marketplace and
+install the named plugin into the user scope:
 
-The `renderer` setting accepts `auto`, `context-full`, or `snapcompact`. `auto` selects snapcompact only for a snapcompact preparation with a vision-capable model and no custom instructions; otherwise it uses context-full. Set an explicit renderer when deterministic selection is required. Automatic LCM is intended for OMP `context-full` and `snapcompact`; handoff, shake, and off remain OMP-controlled.
+```sh
+omp plugin marketplace add https://github.com/nszceta/omp-lcm-inspired-compaction
+omp plugin install omp-lcm-inspired-compaction@nszceta --scope user
+```
+
+The marketplace manifest is `.omp-plugin/marketplace.json`. The `nszceta`
+marketplace name comes from that manifest; verify it with:
+
+```sh
+omp plugin marketplace list
+omp plugin list
+```
+
+To receive new tagged releases, refresh the marketplace metadata and upgrade
+the installed plugin:
+
+```sh
+omp plugin marketplace update nszceta
+omp plugin upgrade omp-lcm-inspired-compaction@nszceta --scope user
+```
+
+To upgrade every marketplace plugin instead:
+
+```sh
+omp plugin marketplace update
+omp plugin upgrade
+```
+
+`omp plugin install ./path/to/this/repository` is useful for local development
+but creates a local link and does not track marketplace releases. Likewise,
+installing a raw GitHub URL is a direct install; use the marketplace commands
+above for update tracking. Restart OMP, or reload extensions, after installing
+or upgrading.
+
+The package supports OMP 17.1.8 and uses only published OMP extension APIs.
+
+The `renderer` setting accepts `auto`, `context-full`, or `snapcompact`.
+`auto` selects snapcompact only for a snapcompact preparation with a
+vision-capable model and no custom instructions; otherwise it uses context-full.
+Set an explicit renderer when deterministic behavior is required. Automatic
+LCM is intended for OMP `context-full` and `snapcompact`; handoff, shake, and
+off remain OMP-controlled.
 
 ## Commands
 
