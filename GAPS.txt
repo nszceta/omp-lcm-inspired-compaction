@@ -23,41 +23,20 @@ P3 - Low: maintainability, ergonomics, or observability weakness that does not
 P0: RELEASE BLOCKERS
 ====================
 
-GAP-002: No live OpenAI or Codex replay has been proven end to end
-----------------------------------------------------------------
-Current behavior:
-  Automated tests and the smoke scenario inject a remote-compaction response.
-  No real `/responses/compact` request followed by a real model continuation has
-  been exercised.
+CLOSED GAP-003: Replay identity was gated only by provider name
+-------------------------------------------------------------
+Closure:
+  Native replay now persists `ompLcmNativeReplayLineageV1` beside encrypted
+  replacement history. The lineage records the provider, effective compaction
+  model ID, Responses API/transport variant, normalized effective endpoint, and
+  a SHA-256 credential identity. OAuth identities derive from stable non-secret
+  credential/account/organization metadata, with token hashing only as a
+  conservative fallback when the registry exposes no stable identity.
 
-Why it matters:
-  Mocked transport proves control flow and preserve-data shape, but cannot prove
-  endpoint acceptance, credential behavior, encrypted-state validity, or that a
-  provider accepts the replay payload on the next turn.
-
-Required closure:
-  Run canaries against supported OpenAI and OpenAI-Codex models. Compact a real
-  conversation containing reasoning and tool calls, rebuild the OMP context,
-  continue the conversation, and verify provider acceptance and semantic
-  continuity.
-
-GAP-003: Replay identity is gated only by provider name
-------------------------------------------------------
-Current behavior:
-  Previous replacement history is reused when its `provider` equals the active
-  model provider. The preserved V1 schema does not record the model ID, API
-  variant, endpoint, account, or credential identity.
-
-Why it matters:
-  Encrypted state created by one model, endpoint, or account may be incompatible
-  with another configuration that uses the same provider string. Reusing it can
-  cause provider rejection or incorrect conversation continuity.
-
-Required closure:
-  Store replay lineage metadata alongside LCM preserve state: provider, model
-  ID, effective Responses API, normalized endpoint, and a non-secret account or
-  credential identity. Seed prior replacement history only when the relevant
-  lineage fields are compatible.
+  Previous encrypted replacement history is seeded only when every lineage
+  field matches. Legacy preserve data and model, API variant, endpoint, account,
+  organization, or credential changes retain textual LCM continuity but start a
+  fresh provider-native lineage.
 
 GAP-004: Actual OMP context reconstruction is not integration-tested
 -------------------------------------------------------------------
@@ -115,22 +94,20 @@ Required closure:
   a narrow credential-refresh retry through the model registry without logging
   secrets or retrying non-authentication failures.
 
-GAP-007: OpenAI V2 streaming replay and migration are missing
-------------------------------------------------------------
-Current behavior:
-  The plugin implements OpenAI remote compaction V1 only. It does not use V2
-  streaming compaction, retained-message budgeting, or seed from existing V2
-  preserve data.
+CLOSED GAP-007: OpenAI V2 streaming replay and migration were missing
+--------------------------------------------------------------------
+Closure:
+  Eligible models now delegate provider-native replay to OMP's published
+  compaction orchestrator. OMP selects streaming V2 ahead of V1, builds the
+  provider request, applies retained-message limits, carries the session's
+  active thinking effort, and stores the returned preserve data.
 
-Why it matters:
-  OMP prefers V2 for eligible modern models. A session that already contains V2
-  replacement history cannot carry that native lineage into this plugin's V1
-  chain. V2-specific retained messages and streaming behavior are unavailable.
-
-Required closure:
-  Implement the public V2 streaming path, including request construction,
-  retained-message limits, preserve-data storage, provider compatibility gates,
-  and V2-to-V1 or V1-to-V2 migration where supported.
+  Replay lineage now distinguishes V1 from V2 and records the mechanism's
+  effective endpoint. Previous replay is supplied to OMP only when provider,
+  model, API variant, mechanism, endpoint, and credential identity all match;
+  otherwise the plugin strips the stale replay while retaining textual LCM
+  state. Live Spark and Luna integration tests require persisted encrypted V2
+  replacement history, and the Spark-to-Luna switch requires a fresh lineage.
 
 GAP-008: Generic remote compaction endpoints are bypassed
 --------------------------------------------------------

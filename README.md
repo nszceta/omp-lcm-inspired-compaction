@@ -121,14 +121,21 @@ creates parent nodes while retaining the original raw artifacts transitively.
 
 Returning a complete result from `session_before_compact` bypasses OMP's
 built-in compaction call. For eligible OpenAI Responses models with remote
-compaction enabled, the plugin explicitly invokes OMP's published V1 remote
-compaction API and merges `openaiRemoteCompaction` with
-`ompLcmArtifactsV1`. OMP then materializes the replacement history as an
-`openaiResponsesHistory` provider payload on the compaction summary. A later
-compaction seeds a fresh remote request only when the preserved provider matches
-the active provider. Provider mismatch, disabled/ineligible models, missing
-credentials, empty input, and remote failure never install stale replay data;
-the textual LCM result remains usable.
+compaction enabled, the plugin delegates replay generation to OMP's published
+compaction orchestrator. OMP uses streaming V2 when the active model advertises
+it and the setting permits it, including retained-message budgeting and the
+session's active thinking effort; otherwise OMP uses its eligible V1 path. The
+plugin merges the resulting `openaiRemoteCompaction` state with
+`ompLcmArtifactsV1`.
+
+A later compaction seeds a fresh remote request only when the preserved replay
+lineage matches the active provider, effective model ID, Responses API variant
+and V1/V2 mechanism, normalized endpoint, and non-secret credential
+fingerprint. OAuth lineage uses stable account/organization/credential
+metadata, so access-token refresh does not break continuity. Legacy or
+mismatched lineage, disabled/ineligible models, missing credentials, empty
+input, and remote failure never install stale replay data; textual LCM
+continuity remains usable while a fresh native lineage starts.
 
 Exact raw artifacts retain opaque `thinkingSignature`, `encrypted_content`, and
 provider payload fields. The summary projection omits those opaque values so
@@ -143,6 +150,83 @@ archival summary. If the event is aborted, the boundary is invalid, an artifact
 write fails, the model/key required for textual summarization is missing, or an
 explicit snapcompact renderer lacks image support, the plugin notifies and
 returns `{ cancel: true }`; it never falls through to built-in compaction.
+
+## Live provider replay verification
+
+Run the opt-in live integration suite against configured OpenAI-Codex
+credentials with:
+
+```text
+bun run test:integration
+```
+
+The suite fixes both requested models at low effort. Its first test compacts
+with `gpt-5.3-codex-spark`, switches to `gpt-5.6-luna`, and proves both use
+OMP's streaming V2 mechanism while the Spark encrypted lineage is not seeded
+into Luna and textual LCM advances to generation 2. Its second test performs
+two Spark compactions and requires encrypted replacement history on both
+rounds, LCM generations 1 then 2, and `lastNativeReplaySeeded: true` on the
+compatible second round. Provider responses and remote compaction are live;
+assertions use persisted structural state rather than generated prose.
+
+On 2026-07-28, package `0.1.6` running on OMP `17.1.8` completed a live
+end-to-end canary with the connected
+`openai-codex/gpt-5.3-codex-spark` provider. No transport or provider response
+was mocked.
+
+**Conclusion:** encrypted provider-native remote compaction is successfully
+integrated with LCM for the tested OpenAI-Codex path. The integration does more
+than store encrypted fields: one compaction persisted the provider replacement
+history alongside the textual LCM DAG, a new OMP process reconstructed that
+history, and the provider accepted a real continuation request.
+
+The pre-compaction conversation contained model reasoning plus real `read`,
+`bash`, and `grep` tool calls. Its early canary values were nonce
+`cedar-orbit-7319`, codename `Silver Heron`, batch size `17`, and the derived
+result `323`. Two large tool-result turns then raised context use to 58.5%, and
+manual compaction reduced it to 15.3%.
+
+The live process reported:
+
+```json
+{
+  "lastGeneration": 1,
+  "lastNativeReplayStatus": "preserved",
+  "lastNativeReplayProvider": "openai-codex",
+  "lastNativeReplayItemCount": 6,
+  "lastNativeReplaySeeded": false,
+  "lastOutcome": "success"
+}
+```
+
+The persisted compaction entry at `2026-07-28T19:24:45.511Z` contained both
+`ompLcmArtifactsV1` and `openaiRemoteCompaction`. The latter identified
+`openai-codex` and held six replacement-history items. This establishes that a
+real remote-compaction response, rather than only the textual LCM result, was
+installed in the saved session.
+
+The first OMP process was then exited. A new process resumed the saved session
+by ID, forcing OMP to rebuild context from the persisted compaction entry. The
+next prompt prohibited tools and file reads and requested the values available
+before compaction. The real provider continuation completed with
+`stopReason: "stop"`, used zero tool calls, and returned:
+
+```text
+CANARY_REPLAY_ACCEPTED cedar-orbit-7319 Silver Heron 17 323
+```
+
+These observations prove the required chain for the connected provider: the
+live compaction endpoint returned provider-native state, OMP persisted and
+reloaded that state in a new process, the provider accepted the reconstructed
+continuation request, and semantic continuity survived compaction. Textual LCM
+roots remain in the same request as the provider-native state, so this canary
+does not claim that native replay was the exclusive source of the recalled
+words.
+
+The canary scope is specifically the existing authenticated OpenAI-Codex
+connection. A direct API-key-authenticated `openai` provider was not configured
+or exercised, so this evidence must not be generalized to that credential and
+endpoint path.
 
 ## Limitations
 

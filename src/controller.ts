@@ -1,10 +1,16 @@
-import type { OpenAiRemoteCompactionResponse } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+  ThinkingLevel,
+  type ThinkingLevel as ThinkingLevelValue,
+} from "@oh-my-pi/pi-agent-core";
 import {
   buildOpenAiNativeHistory,
   defaultConvertToLlm,
+  getCompactionV2Endpoint,
+  getCompactionV2PreserveData,
   getPreservedOpenAiRemoteCompactionData,
-  requestOpenAiRemoteCompaction,
+  compact as runOmpCompaction,
   SUMMARIZATION_SYSTEM_PROMPT,
+  shouldUseCompactionV2Streaming,
   shouldUseOpenAiRemoteCompaction,
   withOpenAiRemoteCompactionPreserveData,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -17,6 +23,15 @@ import {
   NonVisionModelError,
   renderSnapcompact,
 } from "./render-snapcompact.ts";
+import {
+  createNativeReplayLineage,
+  NATIVE_REPLAY_LINEAGE_KEY,
+  type NativeReplayLineageV1,
+  nativeReplayLineagesMatch,
+  parseNativeReplayLineage,
+  type ReplayModel,
+  replayCredentialIdentity,
+} from "./replay-lineage.ts";
 import { captureRawSource, serializeSummaryEntries } from "./source.ts";
 import type {
   SummaryCall,
@@ -25,6 +40,9 @@ import type {
   SummaryResult,
 } from "./summarize.ts";
 import { summarizeText } from "./summarize.ts";
+
+type RequestNativeCompaction =
+  typeof import("@oh-my-pi/pi-agent-core/compaction").requestOpenAiRemoteCompaction;
 
 export interface LcmRuntimeStatus {
   lastRenderer?: "context-full" | "snapcompact";
@@ -85,10 +103,12 @@ export interface ControllerDeps {
   context?: any;
   summaryCall?: SummaryCall;
   complete?: CompletionCall;
-  requestNativeCompaction?: typeof requestOpenAiRemoteCompaction;
+  nativeCompact?: typeof runOmpCompaction;
+  requestNativeCompaction?: RequestNativeCompaction;
   notify?: (message: string) => void;
   log?: (message: string) => void;
   status?: LcmRuntimeStatus;
+  getPluginSettings?: (name: string, cwd?: string) => unknown;
 }
 
 function completionText(response: unknown): string {
@@ -147,6 +167,175 @@ function modelVision(model: any): boolean {
         (x: unknown) => String(x).toLowerCase() === "image",
       ))
   );
+}
+
+interface NativeReplayCredentialContext {
+  model: ReplayModel & {
+    provider: string;
+    id: string;
+    baseUrl?: string;
+  };
+  sessionManager?: { getSessionId?: () => string };
+  modelRegistry?: {
+    getApiKey?: (
+      model: unknown,
+      sessionId?: string,
+      options?: { signal?: AbortSignal },
+    ) => Promise<string | undefined>;
+    authStorage?: {
+      getOAuthAccess?: (
+        provider: string,
+        sessionId?: string,
+        options?: {
+          baseUrl?: string;
+          modelId?: string;
+          signal?: AbortSignal;
+        },
+      ) => Promise<
+        | {
+            accessToken: string;
+            credentialId?: number;
+            accountId?: string;
+            orgId?: string;
+            projectId?: string;
+            email?: string;
+            enterpriseUrl?: string;
+            apiEndpoint?: string;
+          }
+        | undefined
+      >;
+    };
+  };
+}
+
+async function resolveNativeReplayCredential(
+  ctx: NativeReplayCredentialContext,
+  signal?: AbortSignal,
+): Promise<{ apiKey: string; identity: string } | undefined> {
+  const sessionId = ctx.sessionManager?.getSessionId?.();
+  const apiKey = await ctx.modelRegistry?.getApiKey?.(ctx.model, sessionId, {
+    signal,
+  });
+  if (!apiKey) return undefined;
+
+  const oauthAccess = await ctx.modelRegistry?.authStorage?.getOAuthAccess?.(
+    ctx.model.provider,
+    sessionId,
+    {
+      baseUrl: ctx.model.baseUrl,
+      modelId: ctx.model.id,
+      signal,
+    },
+  );
+  if (oauthAccess?.accessToken === apiKey) {
+    const stableParts = [
+      oauthAccess.credentialId,
+      oauthAccess.accountId,
+      oauthAccess.orgId,
+      oauthAccess.projectId,
+      oauthAccess.email,
+      oauthAccess.enterpriseUrl,
+      oauthAccess.apiEndpoint,
+    ].filter((value) => value !== undefined && value !== null && value !== "");
+    const identity =
+      stableParts.length > 0
+        ? stableParts.map(String).join("\0")
+        : oauthAccess.accessToken;
+    return {
+      apiKey,
+      identity: replayCredentialIdentity("oauth", identity),
+    };
+  }
+  return {
+    apiKey,
+    identity: replayCredentialIdentity("api-key", apiKey),
+  };
+}
+
+type NativeReplayMechanism = "v1" | "v2";
+
+function selectNativeReplayMechanism(
+  model: any,
+  settings: { remoteStreamingV2Enabled?: boolean },
+): NativeReplayMechanism | undefined {
+  if (
+    settings.remoteStreamingV2Enabled !== false &&
+    shouldUseCompactionV2Streaming(model)
+  )
+    return "v2";
+  return shouldUseOpenAiRemoteCompaction(model) ? "v1" : undefined;
+}
+
+function activeThinkingLevel(
+  entries: readonly unknown[],
+): ThinkingLevelValue | undefined {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      !("type" in entry) ||
+      entry.type !== "thinking_level_change" ||
+      !("thinkingLevel" in entry)
+    )
+      continue;
+    switch (entry.thinkingLevel) {
+      case ThinkingLevel.Off:
+        return ThinkingLevel.Off;
+      case ThinkingLevel.Minimal:
+        return ThinkingLevel.Minimal;
+      case ThinkingLevel.Low:
+        return ThinkingLevel.Low;
+      case ThinkingLevel.Medium:
+        return ThinkingLevel.Medium;
+      case ThinkingLevel.High:
+        return ThinkingLevel.High;
+      case ThinkingLevel.XHigh:
+        return ThinkingLevel.XHigh;
+      case ThinkingLevel.Max:
+        return ThinkingLevel.Max;
+      default:
+        return undefined;
+    }
+  }
+  return undefined;
+}
+
+function withoutNativeReplayPreserveData(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const preserveData = { ...(value as Record<string, unknown>) };
+  delete preserveData.openaiRemoteCompaction;
+  return preserveData;
+}
+
+function nativeReplayData(value: unknown):
+  | {
+      provider?: string;
+      replacementHistory: Array<Record<string, unknown>>;
+    }
+  | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const preserveData = value as Record<string, unknown>;
+  const v2 = getCompactionV2PreserveData(preserveData);
+  if (v2) return v2;
+  return getPreservedOpenAiRemoteCompactionData(preserveData);
+}
+
+function preservedNativeReplayMechanism(
+  preserveData: Record<string, unknown>,
+): NativeReplayMechanism {
+  const candidate = preserveData.openaiRemoteCompaction;
+  return candidate &&
+    typeof candidate === "object" &&
+    !Array.isArray(candidate) &&
+    "version" in candidate &&
+    candidate.version === "v2"
+    ? "v2"
+    : "v1";
 }
 
 export function createController(ctx: any, injected: ControllerDeps = {}) {
@@ -293,76 +482,147 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       let nativeReplayStatus: NonNullable<
         LcmRuntimeStatus["lastNativeReplayStatus"]
       > = "ineligible";
-      let nativeReplay: OpenAiRemoteCompactionResponse | undefined;
+      let nativeReplayPreserveData: Record<string, unknown> | undefined;
+      let nativeReplayLineage: NativeReplayLineageV1 | undefined;
+      let nativeReplayProvider: string | undefined;
+      let nativeReplayItemCount: number | undefined;
       let nativeReplaySeeded = false;
       let nativeReplayError: string | undefined;
       if (settings.remoteEnabled === false) {
         nativeReplayStatus = "disabled";
-      } else if (shouldUseOpenAiRemoteCompaction(ctx.model)) {
-        try {
-          const remoteMessages = [
-            ...(event.preparation.messagesToSummarize ?? []),
-            ...(event.preparation.turnPrefixMessages ?? []),
-            ...(event.preparation.recentMessages ?? []),
-          ];
-          const previousReplay = getPreservedOpenAiRemoteCompactionData(
-            event.preparation.previousPreserveData,
-          );
-          const previousReplacementHistory =
-            previousReplay && previousReplay.provider === ctx.model.provider
-              ? previousReplay.replacementHistory
-              : undefined;
-          nativeReplaySeeded = previousReplacementHistory !== undefined;
-          const nativeHistory = buildOpenAiNativeHistory(
-            defaultConvertToLlm(remoteMessages),
-            ctx.model,
-            previousReplacementHistory,
-          );
-          if (nativeHistory.length === 0) {
-            nativeReplayStatus = "empty";
-          } else {
-            const apiKey = await ctx.modelRegistry?.getApiKey?.(ctx.model);
-            if (!apiKey) {
+      } else {
+        const mechanism = selectNativeReplayMechanism(ctx.model, settings);
+        if (mechanism) {
+          try {
+            const credential = await resolveNativeReplayCredential(
+              ctx,
+              event.signal,
+            );
+            if (!credential) {
               nativeReplayStatus = "unavailable";
               nativeReplayError = "No API key for provider-native replay";
             } else {
-              const request =
-                deps.requestNativeCompaction ?? requestOpenAiRemoteCompaction;
-              const remote = await request(
+              const endpoint =
+                mechanism === "v2"
+                  ? getCompactionV2Endpoint(ctx.model)
+                  : undefined;
+              if (mechanism === "v2" && !endpoint)
+                throw new Error("OMP V2 compaction endpoint is unavailable");
+              const preferredLineage = createNativeReplayLineage(
                 ctx.model,
-                apiKey,
-                nativeHistory,
-                typeof event.customInstructions === "string" &&
-                  event.customInstructions.trim()
-                  ? event.customInstructions
-                  : SUMMARIZATION_SYSTEM_PROMPT,
-                event.signal,
+                credential.identity,
+                { mechanism, endpoint },
               );
-              const provider = remote.provider ?? ctx.model.provider;
-              if (
-                typeof provider !== "string" ||
-                provider.length === 0 ||
-                provider !== ctx.model.provider
-              )
+              const v1FallbackLineage =
+                mechanism === "v2"
+                  ? createNativeReplayLineage(ctx.model, credential.identity)
+                  : undefined;
+              const savedLineage = parseNativeReplayLineage(
+                event.preparation.previousPreserveData,
+              );
+              const previousReplay = nativeReplayData(
+                event.preparation.previousPreserveData,
+              );
+              const compatible =
+                previousReplay !== undefined &&
+                (nativeReplayLineagesMatch(savedLineage, preferredLineage) ||
+                  (v1FallbackLineage !== undefined &&
+                    nativeReplayLineagesMatch(
+                      savedLineage,
+                      v1FallbackLineage,
+                    )));
+              nativeReplaySeeded = compatible;
+              const nativePreparation = {
+                ...event.preparation,
+                previousPreserveData: compatible
+                  ? event.preparation.previousPreserveData
+                  : withoutNativeReplayPreserveData(
+                      event.preparation.previousPreserveData,
+                    ),
+              };
+              const instructions =
+                typeof event.customInstructions === "string" &&
+                event.customInstructions.trim()
+                  ? event.customInstructions
+                  : SUMMARIZATION_SYSTEM_PROMPT;
+              let nativeResult: { preserveData?: Record<string, unknown> };
+              if (deps.requestNativeCompaction && mechanism === "v1") {
+                const convertedMessages = defaultConvertToLlm([
+                  ...(nativePreparation.messagesToSummarize ?? []),
+                  ...(nativePreparation.turnPrefixMessages ?? []),
+                  ...(nativePreparation.recentMessages ?? []),
+                ]);
+                const nativeHistory = buildOpenAiNativeHistory(
+                  convertedMessages,
+                  ctx.model,
+                  compatible ? previousReplay?.replacementHistory : undefined,
+                );
+                const remote = await deps.requestNativeCompaction(
+                  ctx.model,
+                  credential.apiKey,
+                  nativeHistory,
+                  instructions,
+                  event.signal,
+                );
+                nativeResult = {
+                  preserveData: withOpenAiRemoteCompactionPreserveData(
+                    nativePreparation.previousPreserveData,
+                    remote,
+                  ),
+                };
+              } else {
+                const compact = deps.nativeCompact ?? runOmpCompaction;
+                nativeResult = await compact(
+                  nativePreparation,
+                  ctx.model,
+                  credential.apiKey,
+                  instructions,
+                  event.signal,
+                  {
+                    remoteInstructions: instructions,
+                    thinkingLevel: activeThinkingLevel(
+                      event.branchEntries ?? [],
+                    ),
+                    sessionId: ctx.sessionManager?.getSessionId?.(),
+                  },
+                );
+              }
+              const replay = nativeReplayData(nativeResult.preserveData);
+              if (!replay || replay.replacementHistory.length === 0)
+                throw new Error(
+                  "OMP native compaction returned no replacement history",
+                );
+              const provider = replay.provider ?? ctx.model.provider;
+              if (provider !== ctx.model.provider)
                 throw new Error(
                   "Provider-native replay response provider mismatch",
                 );
+              const preserved = nativeResult.preserveData;
               if (
-                !Array.isArray(remote.replacementHistory) ||
-                remote.replacementHistory.length === 0
+                !preserved ||
+                typeof preserved !== "object" ||
+                !("openaiRemoteCompaction" in preserved)
               )
                 throw new Error(
-                  "Provider-native replay returned empty replacement history",
+                  "OMP native compaction returned no preserve data",
                 );
-              nativeReplay = { ...remote, provider };
+              nativeReplayPreserveData = {
+                openaiRemoteCompaction: preserved.openaiRemoteCompaction,
+              };
+              nativeReplayProvider = provider;
+              nativeReplayItemCount = replay.replacementHistory.length;
+              nativeReplayLineage =
+                preservedNativeReplayMechanism(preserved) === "v2"
+                  ? preferredLineage
+                  : (v1FallbackLineage ?? preferredLineage);
               nativeReplayStatus = "preserved";
             }
+          } catch (error) {
+            if (event.signal?.aborted) throw error;
+            nativeReplayStatus = "failed";
+            nativeReplayError =
+              error instanceof Error ? error.message : String(error);
           }
-        } catch (error) {
-          if (event.signal?.aborted) throw error;
-          nativeReplayStatus = "failed";
-          nativeReplayError =
-            error instanceof Error ? error.message : String(error);
         }
       }
       status.lastSnapcompactFrameCount = undefined;
@@ -381,13 +641,14 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
                 status.lastSnapcompactFrameCount = frameCount(snapResult);
               },
             });
-      if (nativeReplay) {
+      if (nativeReplayPreserveData && nativeReplayLineage) {
         result = {
           ...result,
-          preserveData: withOpenAiRemoteCompactionPreserveData(
-            result.preserveData,
-            nativeReplay,
-          ),
+          preserveData: {
+            ...result.preserveData,
+            ...nativeReplayPreserveData,
+            [NATIVE_REPLAY_LINEAGE_KEY]: nativeReplayLineage,
+          },
         };
       }
       status.lastRenderer = renderer;
@@ -423,9 +684,8 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       status.lastSummaryQuality =
         deterministicFallbackCount === 0 ? "model" : "deterministic-fallback";
       status.lastNativeReplayStatus = nativeReplayStatus;
-      status.lastNativeReplayProvider = nativeReplay?.provider;
-      status.lastNativeReplayItemCount =
-        nativeReplay?.replacementHistory.length;
+      status.lastNativeReplayProvider = nativeReplayProvider;
+      status.lastNativeReplayItemCount = nativeReplayItemCount;
       status.lastNativeReplaySeeded = nativeReplaySeeded;
       if (nativeReplayError)
         status.lastNativeReplayError = nativeReplayError.slice(0, 300);
