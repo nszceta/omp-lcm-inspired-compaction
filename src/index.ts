@@ -1,3 +1,4 @@
+import packageMetadata from "../package.json" with { type: "json" };
 import { persistRenderer, type Renderer, readConfig } from "./config.ts";
 import { PLUGIN_NAME } from "./contracts.ts";
 import {
@@ -9,6 +10,8 @@ import {
   createLcmExpandHandler,
   registerLcmExpandTool,
 } from "./tools.ts";
+
+export const PLUGIN_VERSION = packageMetadata.version;
 export interface LcmExtensionOptions {
   deps?: ControllerDeps;
   context?: any;
@@ -29,6 +32,7 @@ const LCM_HELP = [
   "LCM commands:",
   "  /lcm status                 Show renderer, generation, roots, and outcome.",
   "  /lcm dump                   Show diagnostics and the artifact-backed DAG.",
+  "  /lcm version                Show the currently running plugin version.",
   "  /lcm renderer auto          Select automatically.",
   "  /lcm renderer context-full  Use text roots.",
   "  /lcm renderer snapcompact   Use summary-only snapcompact (vision model required).",
@@ -40,6 +44,11 @@ const LCM_COMPLETIONS = [
   { value: "help ", label: "help", description: "Show LCM command help" },
   { value: "status ", label: "status", description: "Show LCM runtime status" },
   { value: "dump ", label: "dump", description: "Show compaction diagnostics" },
+  {
+    value: "version ",
+    label: "version",
+    description: "Show the running plugin version",
+  },
   {
     value: "renderer ",
     label: "renderer",
@@ -86,6 +95,8 @@ export function registerExtension(
     let output: string;
     if (words[0] === "help" || words.length === 0) {
       output = LCM_HELP;
+    } else if (words[0] === "version") {
+      output = `${PLUGIN_NAME} v${PLUGIN_VERSION}`;
     } else if (words[0] === "status") {
       output = JSON.stringify(ensure(runtimeContext).status, null, 2);
     } else if (words[0] === "dump") {

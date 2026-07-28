@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import packageMetadata from "../package.json" with { type: "json" };
 import { createLcmExtension } from "../src/index.ts";
 import { artifactStore, fakeModel } from "./helpers.ts";
 type RegisteredTool = {
@@ -104,12 +105,17 @@ describe("custom OMP test profile", () => {
       "help ",
       "status ",
       "dump ",
+      "version ",
       "renderer ",
     ]);
     const renderers = command.getArgumentCompletions?.("renderer c");
     expect(renderers?.map((item) => item.value)).toEqual([
       "renderer context-full ",
     ]);
+    const version = await command.handler("version", context);
+    expect(version).toBe(
+      `omp-lcm-inspired-compaction v${packageMetadata.version}`,
+    );
     controller.status.lastOutcome = "success";
     controller.status.lastRoots = [
       {
@@ -131,6 +137,6 @@ describe("custom OMP test profile", () => {
     expect(dump).toContain("LCM DAG (bounded to depth 8):");
     expect(dump).toContain("Node artifact://41 [leaf-summary, level 0]");
     expect(dump).toContain("Summary: runtime expansion succeeded");
-    expect(notifications).toEqual([status, dump]);
+    expect(notifications).toEqual([version, status, dump]);
   });
 });
