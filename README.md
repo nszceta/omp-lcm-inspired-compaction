@@ -9,11 +9,12 @@ install the named plugin into the user scope:
 
 ```sh
 omp plugin marketplace add https://github.com/nszceta/omp-lcm-inspired-compaction
-omp plugin install omp-lcm-inspired-compaction@nszceta --scope user
+omp plugin install omp-lcm-inspired-compaction@nszceta-lcm --scope user
 ```
 
-The marketplace manifest is `.omp-plugin/marketplace.json`. The `nszceta`
-marketplace name comes from that manifest; verify it with:
+The marketplace manifest is `.omp-plugin/marketplace.json`. The `nszceta-lcm`
+marketplace name keeps this plugin separate from other `nszceta` marketplaces;
+verify it with:
 
 ```sh
 omp plugin marketplace list
@@ -24,8 +25,8 @@ To receive new tagged releases, refresh the marketplace metadata and upgrade
 the installed plugin:
 
 ```sh
-omp plugin marketplace update nszceta
-omp plugin upgrade omp-lcm-inspired-compaction@nszceta --scope user
+omp plugin marketplace update nszceta-lcm
+omp plugin upgrade omp-lcm-inspired-compaction@nszceta-lcm --scope user
 ```
 
 To upgrade every marketplace plugin instead:
