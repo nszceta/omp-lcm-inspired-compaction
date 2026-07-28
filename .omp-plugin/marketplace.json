@@ -1,0 +1,15 @@
+{
+  "name": "nszceta",
+  "owner": {
+    "name": "nszceta"
+  },
+  "plugins": [
+    {
+      "name": "omp-lcm-inspired-compaction",
+      "source": {
+        "source": "github",
+        "repo": "nszceta/omp-lcm-inspired-compaction"
+      }
+    }
+  ]
+}

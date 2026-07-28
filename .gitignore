@@ -1,0 +1,18 @@
+node_modules/
+
+# Build and coverage output
+coverage/
+dist/
+*.tgz
+*.tar.gz
+
+# Local OMP and session state
+.ompi/
+.omp/
+.omp-session/
+.sessions/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
