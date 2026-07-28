@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
@@ -7,7 +9,9 @@ import type {
   ExtensionContextActions,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import type { LcmRuntimeStatus } from "../src/controller.ts";
 import { createLcmExtension } from "../src/index.ts";
 
@@ -221,6 +225,195 @@ async function addTurnAndCompact(
     );
   return latestCompactionPreserveData(session.sessionManager.getEntries());
 }
+
+const REPLACEMENT_HISTORY = [
+  {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "provider-preserved turn" }],
+  },
+  {
+    type: "compaction",
+    encrypted_content: "gap-004-encrypted-compaction",
+  },
+] satisfies Array<Record<string, unknown>>;
+
+async function rebuildPersistedProviderContext() {
+  const storage = new MemorySessionStorage();
+  const sessionFile = `/sessions/gap-004-${crypto.randomUUID()}.jsonl`;
+  storage.writeTextSync(sessionFile, "");
+  const manager = await SessionManager.open(sessionFile, "/sessions", storage, {
+    initialCwd: process.cwd(),
+    suppressBreadcrumb: true,
+  });
+  const firstKeptEntryId = manager.appendMessage({
+    role: "user",
+    content: "This local turn is replaced by provider-native history.",
+    timestamp: Date.now(),
+  });
+  manager.appendCompaction(
+    "LCM textual summary",
+    "LCM summary",
+    firstKeptEntryId,
+    1_000,
+    undefined,
+    true,
+    {
+      openaiRemoteCompaction: {
+        provider: "openai",
+        replacementHistory: REPLACEMENT_HISTORY,
+      },
+    },
+  );
+  manager.appendMessage({
+    role: "user",
+    content: "next request after persisted compaction",
+    timestamp: Date.now() + 1,
+  });
+  await manager.close();
+
+  const resumed = await SessionManager.open(sessionFile, "/sessions", storage, {
+    initialCwd: process.cwd(),
+    suppressBreadcrumb: true,
+  });
+  return {
+    resumed,
+    context: resumed.buildSessionContext(),
+  };
+}
+
+function successfulResponsesStream(): Response {
+  const messageId = "msg_gap_004";
+  const responseId = "resp_gap_004";
+  const events = [
+    {
+      type: "response.created",
+      response: { id: responseId, status: "in_progress" },
+    },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: {
+        id: messageId,
+        type: "message",
+        role: "assistant",
+        status: "in_progress",
+        content: [],
+      },
+    },
+    {
+      type: "response.output_text.delta",
+      item_id: messageId,
+      output_index: 0,
+      content_index: 0,
+      delta: "ok",
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      item: {
+        id: messageId,
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "ok", annotations: [] }],
+      },
+    },
+    {
+      type: "response.completed",
+      response: {
+        id: responseId,
+        status: "completed",
+        output: [],
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          total_tokens: 2,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens_details: { reasoning_tokens: 0 },
+        },
+      },
+    },
+  ];
+  const body = events
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+describe("OMP provider-native context reconstruction", () => {
+  test("reattaches persisted replacement history to the active summary", async () => {
+    const { resumed, context } = await rebuildPersistedProviderContext();
+    try {
+      expect(context.messages).toHaveLength(2);
+      expect(context.messages[0]).toMatchObject({
+        role: "compactionSummary",
+        providerPayload: {
+          type: "openaiResponsesHistory",
+          provider: "openai",
+          items: REPLACEMENT_HISTORY,
+        },
+      });
+      expect(context.messages[1]).toMatchObject({
+        role: "user",
+        content: "next request after persisted compaction",
+      });
+    } finally {
+      await resumed.close();
+    }
+  });
+
+  test("transmits rebuilt replacement history in the next Responses request", async () => {
+    const { resumed, context } = await rebuildPersistedProviderContext();
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    try {
+      const model = getBundledModel<"openai-responses">("openai", "gpt-5.4");
+      const stream = streamOpenAIResponses(
+        model,
+        {
+          systemPrompt: [],
+          messages: convertToLlm(context.messages),
+          tools: [],
+        },
+        {
+          apiKey: "integration-test-key",
+          fetch: async (input, init) => {
+            if (typeof init?.body !== "string")
+              throw new Error("Expected a JSON request body");
+            requests.push({
+              url: String(input),
+              body: JSON.parse(init.body) as Record<string, unknown>,
+            });
+            return successfulResponsesStream();
+          },
+        },
+      );
+      const eventTypes: string[] = [];
+      for await (const event of stream) eventTypes.push(event.type);
+
+      expect(eventTypes.at(-1)).toBe("done");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://api.openai.com/v1/responses");
+      expect(requests[0]?.body.input).toEqual([
+        ...REPLACEMENT_HISTORY,
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "next request after persisted compaction",
+            },
+          ],
+        },
+      ]);
+    } finally {
+      await resumed.close();
+    }
+  });
+});
 
 describe("live provider-native replay integration", () => {
   liveTest(

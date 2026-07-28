@@ -38,24 +38,18 @@ Closure:
   organization, or credential changes retain textual LCM continuity but start a
   fresh provider-native lineage.
 
-GAP-004: Actual OMP context reconstruction is not integration-tested
--------------------------------------------------------------------
-Current behavior:
-  Tests prove that the compaction result contains
-  `openaiRemoteCompaction.replacementHistory`. They do not execute OMP's real
-  session-context reconstruction and subsequent provider request.
+CLOSED GAP-004: Actual OMP context reconstruction is integration-tested
+-----------------------------------------------------------------------
+Closure:
+  Deterministic integration coverage now persists replacement history through
+  OMP's `SessionManager`, closes and reopens the session, and executes the real
+  `buildSessionContext` reconstruction. The active compaction summary is
+  asserted to carry the exact `openaiResponsesHistory` provider payload.
 
-Why it matters:
-  Native replay depends on OMP converting preserve data into an
-  `openaiResponsesHistory` provider payload on the compaction summary. A correct
-  stored object is necessary but does not prove the complete reconstruction and
-  transmission path.
-
-Required closure:
-  Add an integration test using OMP's real session reconstruction machinery.
-  Assert that the active compaction summary receives the expected provider
-  payload, then pass the rebuilt history through the actual OpenAI Responses
-  request conversion.
+  The rebuilt OMP messages then pass through OMP's `convertToLlm` and the real
+  OpenAI Responses stream implementation. A fetch boundary assertion proves
+  that the next provider request contains the exact preserved native history,
+  including encrypted compaction data, followed by the new user turn.
 
 P1: HIGH-SEVERITY GAPS
 ======================
