@@ -31,6 +31,14 @@ describe("controller", () => {
     expect(result.compaction).toBeDefined();
     expect(result.compaction.firstKeptEntryId).toBe("keep");
     expect(controller.status.lastOutcome).toBe("success");
+    expect(controller.status.lastRootCount).toBe(1);
+    expect(controller.status.lastRoots).toHaveLength(1);
+    expect(controller.status.lastRawArtifactCount).toBe(1);
+    expect(controller.status.lastSourceEntryCount).toBe(1);
+    expect(controller.status.lastSummaryPreview).toContain(
+      "Retained LCM history",
+    );
+    expect(controller.status.builtInRemoteContextFullIntercepted).toBe(false);
   });
   test("fails closed on boundary and abort", async () => {
     const c = ctx();

@@ -13,7 +13,20 @@ export interface LcmRuntimeStatus {
   lastRenderer?: "context-full" | "snapcompact";
   lastGeneration?: number;
   lastRootCount?: number;
-  lastRemoteEnabledIntercepted?: boolean;
+  lastRoots?: Array<{
+    artifactId: string;
+    level: number;
+    sourceEntryCount: number;
+    tokenCount: number;
+  }>;
+  lastRawArtifactCount?: number;
+  lastSourceEntryCount?: number;
+  lastTokensBefore?: number;
+  lastFirstKeptEntryId?: string;
+  lastSummaryPreview?: string;
+  lastPreserveKeys?: string[];
+  lastSnapcompactFrameCount?: number;
+  builtInRemoteContextFullIntercepted?: boolean;
   lastOutcome?: "success" | "cancelled";
   lastError?: string;
 }
@@ -36,6 +49,23 @@ export interface ControllerDeps {
 function notify(deps: ControllerDeps, text: string) {
   deps.notify?.(text);
   deps.log?.(text);
+}
+
+function boundedPreview(value: unknown, maxLength = 2_000): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return value.length <= maxLength
+    ? value
+    : `${value.slice(0, maxLength)}…`;
+}
+
+function frameCount(value: unknown): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const preserveData = (value as Record<string, unknown>).preserveData;
+  if (!preserveData || typeof preserveData !== "object") return undefined;
+  const archive = (preserveData as Record<string, unknown>).snapcompact;
+  if (!archive || typeof archive !== "object") return undefined;
+  const frames = (archive as Record<string, unknown>).frames;
+  return Array.isArray(frames) ? frames.length : undefined;
 }
 function modelVision(model: any): boolean {
   return (
@@ -136,6 +166,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         previousSummary: prior ? undefined : event.preparation.previousSummary,
         signal: event.signal,
       });
+      status.lastSnapcompactFrameCount = undefined;
       const result =
         renderer === "context-full"
           ? renderContextFull({
@@ -147,11 +178,38 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
               state: dag.state,
               model: ctx.model,
               signal: event.signal,
+              onResult: (snapResult) => {
+                status.lastSnapcompactFrameCount = frameCount(snapResult);
+              },
             });
       status.lastRenderer = renderer;
       status.lastGeneration = generation;
       status.lastRootCount = dag.state.roots.length;
-      status.lastRemoteEnabledIntercepted =
+      status.lastRoots = dag.state.roots.map((root) => ({
+        artifactId: root.artifactId,
+        level: root.level,
+        sourceEntryCount: root.sourceEntryCount,
+        tokenCount: root.tokenCount,
+      }));
+      status.lastRawArtifactCount = capture.rawArtifactIds.length;
+      status.lastSourceEntryCount = leaves.reduce(
+        (count, leaf) => count + leaf.sourceEntryIds.length,
+        0,
+      );
+      status.lastTokensBefore =
+        typeof result.tokensBefore === "number"
+          ? result.tokensBefore
+          : undefined;
+      status.lastFirstKeptEntryId =
+        typeof result.firstKeptEntryId === "string"
+          ? result.firstKeptEntryId
+          : undefined;
+      status.lastSummaryPreview = boundedPreview(result.summary);
+      status.lastPreserveKeys =
+        result.preserveData && typeof result.preserveData === "object"
+          ? Object.keys(result.preserveData)
+          : [];
+      status.builtInRemoteContextFullIntercepted =
         settings.remoteEnabled !== false && renderer === "context-full";
       status.lastOutcome = "success";
       delete status.lastError;

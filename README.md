@@ -2,6 +2,42 @@
 
 Artifact-backed hierarchical compaction for Oh My Pi (OMP). The plugin keeps exact discarded session entries in session-scoped artifacts, builds bounded immutable summary roots, and renders those roots through OMP context-full or public snapcompact APIs.
 
+## How it works
+
+LCM is lossless because it separates **what stays in the active context** from
+**what remains recoverable**. Compaction produces bounded summaries for the
+active context, but every discarded session entry is also stored exactly in a
+session-scoped `lcm-raw` artifact. Immutable summary nodes record provenance
+and links to those raw artifacts.
+
+The first compaction creates level-0 leaf nodes. Each later compaction loads the
+previous roots, adds new level-0 leaves, and condenses them into immutable
+parent nodes whenever the active root set exceeds four roots or the summary
+token budget. Parent nodes link to their children, and children link
+transitively to the exact raw source, so history remains reachable without
+copying the transcript into every new summary:
+
+```text
+generation 1:  leaf A ── raw A     leaf B ── raw B
+
+generation 2:  parent C
+                ├── leaf A ── raw A
+                └── leaf B ── raw B
+              leaf D ── raw D
+
+generation 3:  parent E
+                ├── parent C
+                └── leaf D
+```
+
+Only a bounded set of current roots is carried forward in OMP's
+`preserveData`; older nodes and raw artifacts remain available through their
+links. This gives OMP a small, useful context while retaining exact historical
+source for later retrieval with `lcm_expand`, `read artifact://ID`, or
+`grep` against an artifact URI. The summaries are intentionally lossy views
+for context efficiency; the archival graph is lossless because the original
+discarded entries are preserved verbatim.
+
 ## Install and enable
 
 For automatic marketplace updates, add this repository as a marketplace and
@@ -54,8 +90,9 @@ off remain OMP-controlled.
 ## Commands
 
 - `/lcm` or `/lcm help` displays command help in the OMP UI.
-- `/lcm status` shows the last renderer, generation, root count, remote interception flag, and bounded outcome/error status.
-- Tab completion after `/lcm ` suggests `help`, `status`, and `renderer`; after `/lcm renderer ` it suggests all supported renderers.
+- `/lcm status` shows the last renderer, generation, roots, bounded result metadata, and outcome/error status.
+- `/lcm dump` prints the same bounded diagnostic JSON, including root artifact IDs and summary preview.
+- Tab completion after `/lcm ` suggests `help`, `status`, `dump`, and `renderer`; after `/lcm renderer ` it suggests all supported renderers.
 - `/lcm renderer auto`
 - `/lcm renderer context-full`
 - `/lcm renderer snapcompact`
@@ -67,16 +104,13 @@ Each discarded source chunk is stored as exact JSONL in an `lcm-raw` session art
 ```text
 Expand node: artifact://17
 ```
-
-Use `lcm_expand` for node structure, `read artifact://17` or a selector such as `read artifact://17:1-300` for exact source, and `grep "symbol" artifact://17` for exact search. Artifact IDs are numeric and scoped to the OMP session; never predict an ID.
+Use the registered `lcm_expand` tool for node structure and optional raw previews. Use `read artifact://17` or a selector such as `read artifact://17:1-300` for exact source, and `grep "symbol" artifact://17` for exact search. Root artifact IDs are shown by `/lcm dump`; IDs are numeric and scoped to the OMP session, so never predict an ID.
 
 ## Rendering and remote behavior
 
 Context-full returns a complete custom compaction result containing portable text roots and only the plugin preserve key. Snapcompact receives a synthetic message containing current roots, never the previous raw transcript/archive, and preserves the summary-only archive across context rebuilds. A second compaction creates parent nodes while retaining the original raw artifacts transitively.
 
-Returning a complete result from `session_before_compact` bypasses OMP local, configured remote, and provider-native compaction paths. The status command marks remote-enabled context-full handling. If a model summary fails, the plugin converges to a deterministic bounded archival summary. If the event is aborted, the boundary is invalid, an artifact write fails, the model/key is missing, or an explicit snapcompact renderer lacks image support, the plugin notifies and returns `{ cancel: true }`; it never falls through to built-in compaction.
-
-Summary calls use the active OMP model and its API key. Hosted model traffic may therefore occur for summaries; remote interception refers to OMP's built-in compaction path, not all network traffic.
+Returning a complete result from `session_before_compact` bypasses OMP local, configured remote, and provider-native compaction paths. Diagnostics call this `builtInRemoteContextFullIntercepted`; it is false for snapcompact because that flag describes only OMP's built-in remote context-full branch. If a model summary fails, the plugin converges to a deterministic bounded archival summary. If the event is aborted, the boundary is invalid, an artifact write fails, the model/key is missing, or an explicit snapcompact renderer lacks image support, the plugin notifies and returns `{ cancel: true }`; it never falls through to built-in compaction.
 
 ## Limitations
 

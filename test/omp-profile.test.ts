@@ -14,6 +14,7 @@ describe("custom OMP test profile", () => {
         ) => Array<{ value: string; label: string }> | null;
       }
     >();
+    const tools = new Map<string, unknown>();
     const api = {
       on(name: string, handler: (event: unknown) => unknown) {
         handlers.set(name, handler);
@@ -29,6 +30,9 @@ describe("custom OMP test profile", () => {
       ) {
         commands.set(name, options);
       },
+      registerTool(definition: { name: string }, handler: unknown) {
+        tools.set(definition.name, handler);
+      },
     };
     const notifications: string[] = [];
     const context = {
@@ -41,6 +45,7 @@ describe("custom OMP test profile", () => {
     const controller = createLcmExtension({
       deps: { summaryCall: async () => "profile summary" },
     })(api, context);
+    expect(tools.has("lcm_expand")).toBe(true);
     expect(controller.status).toEqual({});
     expect(handlers.has("session_before_compact")).toBe(true);
     expect(commands.has("lcm")).toBe(true);
@@ -51,6 +56,7 @@ describe("custom OMP test profile", () => {
     expect(topLevel?.map((item) => item.value)).toEqual([
       "help ",
       "status ",
+      "dump ",
       "renderer ",
     ]);
     const renderers = command.getArgumentCompletions?.("renderer c");

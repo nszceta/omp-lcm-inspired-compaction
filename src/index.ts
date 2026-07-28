@@ -5,7 +5,7 @@ import {
   createController,
   type LcmController,
 } from "./controller.ts";
-
+import { registerLcmExpandTool } from "./tools.ts";
 export interface LcmExtensionOptions {
   deps?: ControllerDeps;
   context?: any;
@@ -25,16 +25,18 @@ export const createExtension = createLcmExtension;
 const LCM_HELP = [
   "LCM commands:",
   "  /lcm status                 Show renderer, generation, roots, and outcome.",
+  "  /lcm dump                   Show bounded compaction diagnostics.",
   "  /lcm renderer auto          Select automatically.",
   "  /lcm renderer context-full  Use text roots.",
   "  /lcm renderer snapcompact   Use summary-only snapcompact (vision model required).",
   "  /lcm help                   Show this help.",
-  "Use lcm_expand, read artifact://ID, and grep artifact://ID to retrieve archived history.",
+  "Use the lcm_expand tool, read artifact://ID, and grep artifact://ID to retrieve archived history.",
 ].join("\n");
 
 const LCM_COMPLETIONS = [
   { value: "help ", label: "help", description: "Show LCM command help" },
   { value: "status ", label: "status", description: "Show LCM runtime status" },
+  { value: "dump ", label: "dump", description: "Show compaction diagnostics" },
   {
     value: "renderer ",
     label: "renderer",
@@ -62,6 +64,8 @@ export function registerExtension(
       ...deps,
       status: runtimeStatus,
     }));
+  if (typeof api.registerTool === "function")
+    registerLcmExpandTool(api, ctx);
   api.on?.("session_before_compact", (event: any, eventContext: any) =>
     ensure(eventContext).beforeCompact(event),
   );
@@ -79,8 +83,8 @@ export function registerExtension(
     let output: string;
     if (words[0] === "help" || words.length === 0) {
       output = LCM_HELP;
-    } else if (words[0] === "status") {
-      output = JSON.stringify(ensure(runtimeContext).status);
+    } else if (words[0] === "status" || words[0] === "dump") {
+      output = JSON.stringify(ensure(runtimeContext).status, null, 2);
     } else if (words[0] === "renderer" && words[1]) {
       const renderer = words[1] as Renderer;
       if (!["auto", "context-full", "snapcompact"].includes(renderer)) {

@@ -19,6 +19,7 @@ export interface SnapRenderOptions {
   model: SnapModel;
   signal?: AbortSignal;
   compact?: (...args: any[]) => Promise<any> | any;
+  onResult?: (result: any) => void;
 }
 export class NonVisionModelError extends Error {
   constructor() {
@@ -58,6 +59,7 @@ export async function renderSnapcompact(
   });
   if (!result || typeof result !== "object")
     throw new Error("snapcompact returned an invalid result");
+  options.onResult?.(result);
   return {
     ...result,
     preserveData: { [LCM_PRESERVE_KEY]: options.state },
