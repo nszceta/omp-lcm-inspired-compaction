@@ -23,6 +23,19 @@ describe("summary convergence", () => {
     expect(["aggressive", "deterministic"]).toContain(result.level);
     expect(result.prose.length).toBeLessThanOrEqual(200);
   });
+  test("bounds opaque fallback with the default token estimate", async () => {
+    const opaque = "x".repeat(20_000);
+    const result = await summarizeText(
+      { input: opaque, targetTokens: 100 },
+      async () => {
+        throw new Error("unavailable");
+      },
+    );
+    expect(result.level).toBe("deterministic");
+    expect(result.tokenCount).toBeLessThanOrEqual(100);
+    expect(result.prose.length).toBeLessThanOrEqual(400);
+    expect(result.prose).not.toContain(opaque);
+  });
   test("propagates abort", async () => {
     const c = new AbortController();
     c.abort();

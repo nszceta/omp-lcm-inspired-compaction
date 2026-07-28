@@ -1,0 +1,516 @@
+OMP LCM INSPIRED COMPACTION: KNOWN GAP REGISTER
+================================================
+
+Scope
+-----
+
+This file records known gaps in the current repository working tree, including
+provider-native replay changes that have not yet been committed, released, or
+installed. It ranks gaps by operational severity. The ordering within a
+severity class is intentional.
+
+Severity definitions
+--------------------
+
+P0 - Release blocker: correctness or integration is not sufficiently proven
+     for production use.
+P1 - High: material continuity, security, availability, cost, or compatibility
+     risk. A production deployment needs an explicit acceptance decision.
+P2 - Medium: important functional or operational limitation with a usable
+     workaround.
+P3 - Low: maintainability, ergonomics, or observability weakness that does not
+     normally threaten retained history.
+
+P0: RELEASE BLOCKERS
+====================
+
+GAP-001: The repaired implementation is not released or running
+---------------------------------------------------------------
+Current behavior:
+  The compaction-quality and provider-native replay changes exist only in the
+  repository working tree. The marketplace and locally installed plugin still
+  refer to the previously released v0.1.5 code.
+
+Why it matters:
+  Tests against the working tree do not change the behavior of an already
+  running OMP process. Operators could believe replay is active when the loaded
+  extension does not contain it.
+
+Required closure:
+  Review the complete diff, bump the point version, commit and push it, create
+  and push a tag, publish a GitHub release, upgrade the marketplace installation,
+  restart or reload OMP, and verify `/lcm version` from the new process.
+
+GAP-002: No live OpenAI or Codex replay has been proven end to end
+----------------------------------------------------------------
+Current behavior:
+  Automated tests and the smoke scenario inject a remote-compaction response.
+  No real `/responses/compact` request followed by a real model continuation has
+  been exercised.
+
+Why it matters:
+  Mocked transport proves control flow and preserve-data shape, but cannot prove
+  endpoint acceptance, credential behavior, encrypted-state validity, or that a
+  provider accepts the replay payload on the next turn.
+
+Required closure:
+  Run canaries against supported OpenAI and OpenAI-Codex models. Compact a real
+  conversation containing reasoning and tool calls, rebuild the OMP context,
+  continue the conversation, and verify provider acceptance and semantic
+  continuity.
+
+GAP-003: Replay identity is gated only by provider name
+------------------------------------------------------
+Current behavior:
+  Previous replacement history is reused when its `provider` equals the active
+  model provider. The preserved V1 schema does not record the model ID, API
+  variant, endpoint, account, or credential identity.
+
+Why it matters:
+  Encrypted state created by one model, endpoint, or account may be incompatible
+  with another configuration that uses the same provider string. Reusing it can
+  cause provider rejection or incorrect conversation continuity.
+
+Required closure:
+  Store replay lineage metadata alongside LCM preserve state: provider, model
+  ID, effective Responses API, normalized endpoint, and a non-secret account or
+  credential identity. Seed prior replacement history only when the relevant
+  lineage fields are compatible.
+
+GAP-004: Actual OMP context reconstruction is not integration-tested
+-------------------------------------------------------------------
+Current behavior:
+  Tests prove that the compaction result contains
+  `openaiRemoteCompaction.replacementHistory`. They do not execute OMP's real
+  session-context reconstruction and subsequent provider request.
+
+Why it matters:
+  Native replay depends on OMP converting preserve data into an
+  `openaiResponsesHistory` provider payload on the compaction summary. A correct
+  stored object is necessary but does not prove the complete reconstruction and
+  transmission path.
+
+Required closure:
+  Add an integration test using OMP's real session reconstruction machinery.
+  Assert that the active compaction summary receives the expected provider
+  payload, then pass the rebuilt history through the actual OpenAI Responses
+  request conversion.
+
+P1: HIGH-SEVERITY GAPS
+======================
+
+GAP-005: Codex session and compaction context is not forwarded
+-------------------------------------------------------------
+Current behavior:
+  `requestOpenAiRemoteCompaction` is called without `sessionId`,
+  `providerSessionState`, or `codexCompaction`. The upstream helper still adds
+  basic Codex authentication and attestation headers.
+
+Why it matters:
+  Codex compatibility metadata can be session-sensitive. Omitting it may reduce
+  cache continuity, omit required request identity, or cause a provider to
+  reject encrypted state even when basic authentication succeeds.
+
+Required closure:
+  Locate the corresponding public values in the extension context or compaction
+  event and pass them through the request options. Add Codex-specific tests that
+  assert the generated compatibility headers and request context.
+
+GAP-006: Credential refresh and authenticated retry are missing
+---------------------------------------------------------------
+Current behavior:
+  The plugin obtains one API key from `modelRegistry` and calls the remote
+  compaction helper directly. OMP's built-in compaction path wraps calls with its
+  authentication retry logic.
+
+Why it matters:
+  Expired or refreshable credentials cause immediate replay degradation even
+  when OMP could refresh them. Textual LCM remains available, but provider-native
+  continuity is lost for that generation.
+
+Required closure:
+  Use a published OMP authentication wrapper if available to extensions, or add
+  a narrow credential-refresh retry through the model registry without logging
+  secrets or retrying non-authentication failures.
+
+GAP-007: OpenAI V2 streaming replay and migration are missing
+------------------------------------------------------------
+Current behavior:
+  The plugin implements OpenAI remote compaction V1 only. It does not use V2
+  streaming compaction, retained-message budgeting, or seed from existing V2
+  preserve data.
+
+Why it matters:
+  OMP prefers V2 for eligible modern models. A session that already contains V2
+  replacement history cannot carry that native lineage into this plugin's V1
+  chain. V2-specific retained messages and streaming behavior are unavailable.
+
+Required closure:
+  Implement the public V2 streaming path, including request construction,
+  retained-message limits, preserve-data storage, provider compatibility gates,
+  and V2-to-V1 or V1-to-V2 migration where supported.
+
+GAP-008: Generic remote compaction endpoints are bypassed
+--------------------------------------------------------
+Current behavior:
+  Returning a complete extension result bypasses OMP's configured generic
+  remote endpoint. The plugin explicitly restores only eligible OpenAI Responses
+  native compaction.
+
+Why it matters:
+  Users configured for self-hosted summarizers, OpenAI-compatible chat servers,
+  or other remote compaction endpoints silently receive local LCM summaries
+  instead of their configured remote behavior.
+
+Required closure:
+  Add explicit support for OMP's published generic remote-compaction API, with a
+  clear precedence policy between LCM summarization, OpenAI native replay, and a
+  configured generic endpoint.
+
+GAP-009: Existing archived encrypted metadata cannot be backfilled into replay
+---------------------------------------------------------------------------
+Current behavior:
+  Exact raw artifacts preserve `thinkingSignature`, `encrypted_content`, and
+  provider payloads, but the plugin starts native replay only from current
+  compaction messages or a recognized prior replacement history.
+
+Why it matters:
+  Arbitrary encrypted reasoning fields are not equivalent to a valid ordered
+  remote-compaction replacement history. Sessions compacted before native replay
+  support cannot safely recover provider-native continuity for their old turns.
+
+Required closure:
+  Do not guess or splice arbitrary encrypted fields. Backfill only if OMP exposes
+  a validated native-history reconstruction API that can rebuild ordered
+  call/result and reasoning items from archived entries. Otherwise document the
+  first native replay as a new lineage boundary.
+
+GAP-010: Native replay payload size is not bounded or reported
+-------------------------------------------------------------
+Current behavior:
+  Replacement history is stored in compaction preserve data without a plugin
+  byte ceiling. Diagnostics report item count but not serialized bytes, item
+  types, or growth between generations.
+
+Why it matters:
+  Large preserve data increases session-file size, context reconstruction cost,
+  memory usage, and startup risk. Item count alone does not identify one very
+  large encrypted item.
+
+Required closure:
+  Measure serialized bytes and item-type counts before installation, expose them
+  in status and dump output, define a defensive maximum, and degrade to textual
+  LCM without installing oversized replay data.
+
+GAP-011: Raw artifacts contain plaintext sensitive data at rest
+--------------------------------------------------------------
+Current behavior:
+  Raw JSONL artifacts preserve exact prompts, tool results, filesystem content,
+  and other session entries. Provider reasoning may be encrypted, but ordinary
+  user and tool content is not encrypted by this plugin.
+
+Why it matters:
+  Session artifacts can contain credentials, proprietary source, personal data,
+  and command output. Filesystem compromise or overly broad permissions expose
+  the full archived conversation.
+
+Required closure:
+  Define the artifact store's security boundary, verify restrictive permissions,
+  support encryption at rest where OMP permits it, and provide retention and
+  secure-deletion controls. Never weaken exact retrieval silently.
+
+GAP-012: Multi-artifact compaction is not transactional
+------------------------------------------------------
+Current behavior:
+  Raw, leaf, and parent artifacts are written sequentially. A later failure
+  cancels installation of the new preserve state, but earlier writes can remain
+  as unreachable orphan artifacts.
+
+Why it matters:
+  Repeated failures can leak disk space and sensitive content. There is no atomic
+  commit spanning artifact writes and compaction installation.
+
+Required closure:
+  Use an OMP transaction API if one becomes public. Until then, record a pending
+  write set and add safe orphan discovery and garbage collection that never
+  deletes artifacts reachable from any installed root.
+
+GAP-013: Local semantic summarization and native replay are sequential
+--------------------------------------------------------------------
+Current behavior:
+  The plugin completes raw capture, semantic leaf summaries, DAG condensation,
+  and then the provider-native remote request.
+
+Why it matters:
+  Eligible compactions pay both model costs and their latencies serially. Large
+  compactions can block the user substantially longer than either path alone.
+
+Required closure:
+  Run independent local summarization and native remote compaction concurrently
+  after source selection, with shared cancellation and fail-isolated results.
+  Preserve the rule that remote failure cannot invalidate a valid textual LCM
+  result.
+
+GAP-014: Fail-closed behavior trades continuity for availability
+---------------------------------------------------------------
+Current behavior:
+  After accepting `session_before_compact`, boundary errors, artifact failures,
+  missing textual-summary credentials, and unsupported explicit renderers return
+  `{ cancel: true }`. The plugin never falls through to OMP's built-in path.
+
+Why it matters:
+  This prevents accidental double compaction and partial installation, but a
+  plugin-specific failure can leave the session unable to compact until the
+  cause is fixed or the plugin is disabled.
+
+Required closure:
+  Keep fail-closed as the default. Add explicit operator guidance, actionable
+  error codes, and a deliberate command or configuration for disabling LCM
+  before retrying with OMP's built-in compaction. Never fall through silently.
+
+GAP-015: Deterministic fallback preserves bytes, not semantic continuity
+-----------------------------------------------------------------------
+Current behavior:
+  When model summarization cannot converge, the plugin stores a bounded source
+  excerpt and marks summary quality as `deterministic-fallback`. Exact history
+  remains retrievable from raw artifacts.
+
+Why it matters:
+  The active model may lose decisions or unresolved work that fall outside the
+  excerpt. Retrieval is possible but is not guaranteed to happen automatically.
+
+Required closure:
+  Add visible degradation warnings, targeted retry of failed leaves, and a repair
+  command that can rebuild degraded nodes once a summarization model is
+  available. Keep exact raw artifacts as the authority.
+
+P2: MEDIUM-SEVERITY GAPS
+========================
+
+GAP-016: Native replay degradation is not proactively surfaced
+----------------------------------------------------------------
+Current behavior:
+  `/lcm status` and `/lcm dump` expose replay status and a bounded error, but a
+  remote replay failure does not produce a dedicated user warning when textual
+  LCM succeeds.
+
+Why it matters:
+  Operators can unknowingly continue without provider-native continuity.
+
+Required closure:
+  Emit one concise warning per degraded generation, including status and provider,
+  while avoiding repeated notifications or encrypted payload content.
+
+GAP-017: No asynchronous soft-threshold or background compaction
+---------------------------------------------------------------
+Current behavior:
+  Compaction runs synchronously in the public `session_before_compact` hook.
+
+Why it matters:
+  Work begins only when OMP invokes compaction and blocks that operation. The
+  plugin cannot summarize ahead of the hard context boundary or install a result
+  atomically in the background.
+
+Required closure:
+  Requires public OMP lifecycle and transaction APIs for background planning,
+  cancellation, and atomic installation.
+
+GAP-018: Handoff, shake, and automatic pre-handoff injection are unsupported
+-------------------------------------------------------------------------
+Current behavior:
+  Automatic LCM targets ordinary `context-full` and `snapcompact` events.
+  Handoff and shake execute outside or before the ordinary custom result path,
+  and the extension cannot inject source automatically before handoff.
+
+Why it matters:
+  Users choosing those strategies do not receive equivalent LCM archival and
+  replay behavior.
+
+Required closure:
+  Add support only when OMP exposes public handoff/shake lifecycle hooks and a
+  safe source-injection contract. Document explicit supported strategies until
+  then.
+
+GAP-019: Automatic renderer selection cannot observe hidden OMP guidance
+------------------------------------------------------------------------
+Current behavior:
+  `renderer=auto` uses public strategy, custom-instruction, and model-vision
+  information. Internal OMP guidance overrides are not exposed to extensions.
+
+Why it matters:
+  Auto selection can differ from an internal OMP decision in edge cases.
+
+Required closure:
+  Use an explicit renderer for deterministic behavior, or consume a future
+  public resolved-action field from OMP.
+
+GAP-020: Artifact IDs are session-scoped rather than globally unique
+--------------------------------------------------------------------
+Current behavior:
+  DAG links use numeric artifact IDs assigned by the session artifact manager.
+
+Why it matters:
+  An ID copied between sessions can resolve to unrelated content or nothing.
+  External indexes cannot treat `artifact://86` as a global identity.
+
+Required closure:
+  Include a session identity in external references or adopt a public globally
+  unique artifact identifier if OMP provides one.
+
+GAP-021: Retrieval is available but not guaranteed to occur
+-----------------------------------------------------------
+Current behavior:
+  Active context contains bounded root summaries and retrieval instructions.
+  The model must choose `lcm_expand`, `read`, or `grep` when exact archived detail
+  is needed.
+
+Why it matters:
+  A model can answer from an incomplete summary without retrieving authoritative
+  history.
+
+Required closure:
+  Add policy-driven retrieval triggers or pre-turn relevance lookup when a public
+  hook permits it. Keep exact citations to artifact IDs in retrieved answers.
+
+GAP-022: Dump and expansion limits can hide deep or wide history
+---------------------------------------------------------------
+Current behavior:
+  DAG inspection has depth, node-count, output-size, raw-preview, and summary
+  preview limits. `/lcm dump` intentionally favors a structural overview.
+
+Why it matters:
+  A single dump does not prove every descendant is readable and can omit the
+  branch containing a sought detail.
+
+Required closure:
+  Keep limits for safety, but expose truncation counts and continuation root IDs
+  consistently so callers can expand the omitted branch deliberately.
+
+GAP-023: No orphan garbage collection or retention policy
+---------------------------------------------------------
+Current behavior:
+  Artifacts are retained for the session lifetime. The plugin does not enumerate
+  unreachable nodes, expire old raw history, or report retained bytes.
+
+Why it matters:
+  Long-running or failure-prone sessions can accumulate disk usage indefinitely.
+
+Required closure:
+  Add reachability analysis from every installed preserve root, dry-run reporting,
+  configurable retention, and safe deletion integrated with the session store.
+
+GAP-024: Preserve-state schema evolution has no migration framework
+-------------------------------------------------------------------
+Current behavior:
+  LCM preserve state accepts schema version 1. Unknown versions are rejected.
+  Replay lineage additions do not yet have a versioned plugin-owned schema.
+
+Why it matters:
+  Future changes to root metadata or replay identity can strand older sessions or
+  require ad hoc marker-based repair.
+
+Required closure:
+  Define explicit versioned migrations, retain forward-compatible unknown fields
+  where safe, and test upgrades from every released preserve schema.
+
+GAP-025: Snapcompact integration is summary-only
+------------------------------------------------
+Current behavior:
+  The plugin feeds bounded LCM root text to snapcompact as a synthetic message.
+  It does not generate or retain visual frames from raw historical messages;
+  `lastSnapcompactFrameCount` is normally zero.
+
+Why it matters:
+  Users expecting snapcompact's visual-frame archive do not receive it. Historical
+  images remain only where exact raw session artifacts preserve them.
+
+Required closure:
+  Either keep and clearly label summary-only behavior, or implement frame
+  generation and preservation with explicit memory and payload limits.
+
+GAP-026: Replay and compaction telemetry is minimal
+--------------------------------------------------
+Current behavior:
+  Runtime status reports the latest outcome, item count, provider, and bounded
+  error. It does not report duration, request bytes, response bytes, retry count,
+  provider cost, item types, or per-stage latency.
+
+Why it matters:
+  Operators cannot distinguish slow local summaries from remote transport, track
+  replay growth, or set reliable alerts and budgets.
+
+Required closure:
+  Add structured, secret-safe metrics for source capture, leaf summarization,
+  DAG condensation, native replay, payload sizes, and total compaction latency.
+
+P3: LOWER-SEVERITY GAPS
+=======================
+
+GAP-027: Runtime diagnostics are ephemeral
+------------------------------------------
+Current behavior:
+  `/lcm status` describes only the latest in-memory controller state. Reloading
+  the extension or restarting OMP clears it, although installed compaction
+  preserve data remains in the session.
+
+Why it matters:
+  Post-restart debugging loses the last failure and timing context.
+
+Required closure:
+  Reconstruct safe status fields from active preserve data and optionally persist
+  a bounded diagnostic record without storing credentials or full payloads.
+
+GAP-028: Settings persistence probes multiple manager methods dynamically
+------------------------------------------------------------------------
+Current behavior:
+  Renderer persistence adapts to several possible plugin-manager method names at
+  runtime.
+
+Why it matters:
+  API drift is discovered only during command execution and can make
+  `/lcm renderer` fail even though compaction itself still runs.
+
+Required closure:
+  Bind to one published typed settings API for the supported OMP version and add
+  an integration test for persistence across reload.
+
+GAP-029: The extension remains tightly coupled to OMP 17.1.8
+-----------------------------------------------------------
+Current behavior:
+  Runtime and peer dependencies are pinned to OMP 17.1.8 public APIs.
+
+Why it matters:
+  Newer OMP releases may alter compaction preparation, provider history, tool
+  registration, or session reconstruction contracts. Older releases are not
+  supported.
+
+Required closure:
+  Define a tested compatibility matrix, add CI against supported OMP releases,
+  and fail installation clearly when the host is outside that range.
+
+GAP-030: No automated live release canary
+-----------------------------------------
+Current behavior:
+  Unit, integration-shaped, and local smoke tests run before release, but no
+  post-release automation installs the marketplace tag into a clean OMP profile
+  and exercises compaction.
+
+Why it matters:
+  Packaging, marketplace metadata, dependency installation, or extension reload
+  can fail despite source tests passing.
+
+Required closure:
+  Add a release canary that installs the tagged marketplace version, verifies
+  `/lcm version`, performs local compaction, inspects the DAG, and optionally runs
+  a credentialed native-replay canary in a protected environment.
+
+Ranking notes
+-------------
+
+- Exact raw preservation prevents irreversible conversational data loss, but it
+  does not make every semantic or provider-native continuity failure harmless.
+- Textual LCM fallback is the primary safety net for native replay failure.
+- P0 items should be closed before claiming production-ready provider-native
+  replay. P1 items require explicit risk acceptance even after P0 closure.
+- Some P2 limitations require new public OMP APIs and cannot be solved entirely
+  inside a standalone extension today.

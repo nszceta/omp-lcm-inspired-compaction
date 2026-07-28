@@ -1,15 +1,12 @@
 import packageMetadata from "../package.json" with { type: "json" };
-import { persistRenderer, type Renderer, readConfig } from "./config.ts";
+import { persistRenderer, type Renderer } from "./config.ts";
 import { PLUGIN_NAME } from "./contracts.ts";
 import {
   type ControllerDeps,
   createController,
   type LcmController,
 } from "./controller.ts";
-import {
-  createLcmExpandHandler,
-  registerLcmExpandTool,
-} from "./tools.ts";
+import { createLcmExpandHandler, registerLcmExpandTool } from "./tools.ts";
 
 export const PLUGIN_VERSION = packageMetadata.version;
 export interface LcmExtensionOptions {
@@ -76,8 +73,7 @@ export function registerExtension(
       ...deps,
       status: runtimeStatus,
     }));
-  if (typeof api.registerTool === "function")
-    registerLcmExpandTool(api, ctx);
+  if (typeof api.registerTool === "function") registerLcmExpandTool(api, ctx);
   api.on?.("session_before_compact", (event: any, eventContext: any) =>
     ensure(eventContext).beforeCompact(event),
   );
@@ -102,7 +98,10 @@ export function registerExtension(
     } else if (words[0] === "dump") {
       const status = ensure(runtimeContext).status;
       const roots = status.lastRoots ?? [];
-      const expand = createLcmExpandHandler();
+      const expand = createLcmExpandHandler(undefined, {
+        summaryLimit: 240,
+        singleLineSummaries: true,
+      });
       const dag =
         roots.length === 0
           ? "(no roots recorded)"

@@ -164,6 +164,25 @@ export function selectSourceEntries(event: SourceEvent): SourceSelection {
 function defaultEstimate(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
+const OMITTED_SUMMARY_FIELDS: Record<string, true> = {
+  encrypted_content: true,
+  encryptedContent: true,
+  providerPayload: true,
+  thinkingSignature: true,
+};
+const OMITTED_SUMMARY_VALUE =
+  "[opaque provider metadata omitted; preserved in raw artifact]";
+
+export function serializeSummaryEntries(entries: SourceEntry[]): string {
+  return `${entries
+    .map((entry) =>
+      JSON.stringify(entry, (key, value) =>
+        OMITTED_SUMMARY_FIELDS[key] ? OMITTED_SUMMARY_VALUE : value,
+      ),
+    )
+    .join("\n")}\n`;
+}
+
 export function planRawChunks(
   entries: SourceEntry[],
   options: {

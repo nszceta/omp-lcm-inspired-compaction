@@ -47,4 +47,31 @@ describe("lcm_expand", () => {
     expect(await handler({ artifactId: "no" }, {})).toContain("numeric");
     expect(await handler({ artifactId: "4" }, {})).toContain("missing");
   });
+  test("renders bounded single-line summaries for structural dumps", async () => {
+    const path = "/tmp/lcm-structural-dump-9";
+    await Bun.write(
+      path,
+      JSON.stringify({
+        schema: "omp-lcm-node/v1",
+        kind: "condensed-summary",
+        level: 2,
+        summary: `first line\n${"detail ".repeat(100)}`,
+        children: [],
+        rawSources: [],
+      }),
+    );
+    const handler = createLcmExpandHandler(
+      () => ({
+        sessionManager: { getArtifactPath: async () => path },
+      }),
+      { summaryLimit: 40, singleLineSummaries: true },
+    );
+    const out = await handler({ artifactId: "9", depth: 8 }, {});
+    const summaryLine = out
+      .split("\n")
+      .find((line) => line.startsWith("Summary:"));
+    expect(summaryLine).toBeDefined();
+    expect(summaryLine?.length).toBeLessThanOrEqual(49);
+    expect(summaryLine).not.toContain("detail detail detail detail detail");
+  });
 });

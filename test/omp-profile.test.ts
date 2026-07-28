@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import packageMetadata from "../package.json" with { type: "json" };
 import { createLcmExtension } from "../src/index.ts";
 import { artifactStore, fakeModel } from "./helpers.ts";
+
 type RegisteredTool = {
   name: string;
   execute?: (

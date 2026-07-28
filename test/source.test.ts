@@ -6,6 +6,7 @@ import {
   SourceAbortError,
   SourceBoundaryError,
   selectSourceEntries,
+  serializeSummaryEntries,
 } from "../src/source.ts";
 import { entry, event, jsonLines, preparation } from "./helpers.ts";
 
@@ -49,6 +50,38 @@ describe("source selection", () => {
       ),
     );
     expect(s.entries.map((x) => x.id)).toEqual(["new"]);
+  });
+  test("preserves opaque metadata only in exact raw artifacts", async () => {
+    const entries = [
+      {
+        id: "a",
+        message: {
+          content: [
+            {
+              type: "thinking",
+              thinking: "useful reasoning",
+              thinkingSignature: "encrypted-secret",
+            },
+          ],
+          providerPayload: { encrypted_content: "opaque-secret" },
+        },
+      },
+    ];
+    const summaryInput = serializeSummaryEntries(entries);
+    expect(summaryInput).toContain("useful reasoning");
+    expect(summaryInput).toContain("opaque provider metadata omitted");
+    expect(summaryInput).not.toContain("encrypted-secret");
+    expect(summaryInput).not.toContain("opaque-secret");
+    let rawArtifact = "";
+    await captureRawSource(
+      event(preparation("keep"), [...entries, entry("keep")]),
+      async (content) => {
+        rawArtifact = content;
+        return "1";
+      },
+    );
+    expect(rawArtifact).toContain("encrypted-secret");
+    expect(rawArtifact).toContain("opaque-secret");
   });
   test("rejects missing boundary and abort", () => {
     expect(() =>

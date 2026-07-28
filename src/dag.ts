@@ -1,3 +1,4 @@
+import { boundedByTokens } from "./summarize.ts";
 export const MAX_ACTIVE_ROOTS = 4;
 export const ROOT_SUMMARY_TARGET_TOKENS = 2_048;
 export interface LcmRootRef {
@@ -47,6 +48,10 @@ export interface DagOptions {
   legacySourceEntryIds?: string[];
   tokenCount?: (text: string) => number;
   summarize?: (text: string, targetTokens: number) => Promise<string> | string;
+  repairRoot?: (
+    root: LcmRootRef,
+    targetTokens: number,
+  ) => Promise<string | undefined> | string | undefined;
   signal?: AbortSignal;
 }
 const numeric = (id: string) =>
@@ -99,6 +104,7 @@ export async function buildDag(options: DagOptions): Promise<DagResult> {
   } = options;
   checkAbort(signal);
   const roots = (options.priorRoots ?? []).map(validateRoot);
+  const priorRootCount = roots.length;
   if (options.previousSummary && !options.priorRoots?.length) {
     const sourceIds = [...(options.legacySourceEntryIds ?? [])];
     const node: LcmNodeArtifactV1 = {
@@ -154,48 +160,66 @@ export async function buildDag(options: DagOptions): Promise<DagResult> {
       tokenCount: leaf.tokenCount ?? tokenCount(node.summary),
     });
   }
-  const totalTokens = () =>
-    roots.reduce((n, r) => n + tokenCount(r.summary) + 8, 0);
-  while (
-    roots.length > MAX_ACTIVE_ROOTS ||
-    totalTokens() > ROOT_SUMMARY_TARGET_TOKENS
-  ) {
+  const parentTarget = ROOT_SUMMARY_TARGET_TOKENS - 8;
+  const condense = async (
+    group: LcmRootRef[],
+    replacement?: string,
+  ): Promise<LcmRootRef> => {
     checkAbort(signal);
-    const group = roots.splice(0, Math.min(MAX_ACTIVE_ROOTS, roots.length));
-    let summary = await summarize(
-      group.map((r, i) => `Root ${i + 1}: ${r.summary}`).join("\n"),
-      ROOT_SUMMARY_TARGET_TOKENS,
+    const source = group
+      .map((root, index) => `Root ${index + 1}: ${root.summary}`)
+      .join("\n");
+    const candidate = String(
+      replacement ?? (await summarize(source, parentTarget)),
+    ).trim();
+    let summary = boundedByTokens(
+      candidate || source,
+      parentTarget,
+      tokenCount,
     );
-    checkAbort(signal);
-    if (
-      !summary ||
-      (group.length === 1 &&
-        tokenCount(summary) >= tokenCount(group[0].summary))
-    ) {
-      summary = `Archived LCM history: ${group[0].summary}`.slice(
-        0,
-        Math.max(64, (ROOT_SUMMARY_TARGET_TOKENS - 16) * 3),
+    if (!summary)
+      summary = boundedByTokens(
+        "Archived LCM history",
+        parentTarget,
+        tokenCount,
       );
-    }
+    checkAbort(signal);
     const node: LcmNodeArtifactV1 = {
       schema: "omp-lcm-node/v1",
       kind: "condensed-summary",
-      level: Math.max(...group.map((r) => r.level)) + 1,
+      level: Math.max(...group.map((root) => root.level)) + 1,
       summary,
-      children: group.map((r) => checkId(r.artifactId)),
+      children: group.map((root) => checkId(root.artifactId)),
       rawSources: [],
       sourceEntryIds: [],
-      sourceEntryCount: group.reduce((n, r) => n + r.sourceEntryCount, 0),
+      sourceEntryCount: group.reduce(
+        (count, root) => count + root.sourceEntryCount,
+        0,
+      ),
       createdAt: new Date().toISOString(),
     };
     const id = await saveNode(store, node, signal);
-    roots.unshift({
+    return {
       artifactId: id,
       level: node.level,
       summary,
       sourceEntryCount: node.sourceEntryCount,
       tokenCount: tokenCount(summary),
-    });
+    };
+  };
+  if (options.repairRoot)
+    for (let index = 0; index < priorRootCount; index++) {
+      const repaired = await options.repairRoot(roots[index], parentTarget);
+      if (repaired) roots[index] = await condense([roots[index]], repaired);
+    }
+  const totalTokens = () =>
+    roots.reduce((count, root) => count + tokenCount(root.summary) + 8, 0);
+  while (
+    roots.length > MAX_ACTIVE_ROOTS ||
+    totalTokens() > ROOT_SUMMARY_TARGET_TOKENS
+  ) {
+    const group = roots.splice(0, Math.min(MAX_ACTIVE_ROOTS, roots.length));
+    roots.unshift(await condense(group));
   }
   return {
     roots,

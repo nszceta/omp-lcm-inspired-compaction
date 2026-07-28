@@ -34,10 +34,7 @@ export interface SummaryResult {
   tokenCount: number;
 }
 
-const DEFAULT_COUNT: TokenCounter = (text) => {
-  const trimmed = text.trim();
-  return trimmed ? trimmed.split(/\s+/u).length : 0;
-};
+const DEFAULT_COUNT: TokenCounter = (text) => Math.ceil(text.length / 4);
 
 const CATEGORY_PROMPT = [
   "Summarize the source faithfully and concisely.",
@@ -56,29 +53,41 @@ function checkAbort(signal: AbortSignal): void {
   }
 }
 
+export function boundedByTokens(
+  input: string,
+  target: number,
+  count: TokenCounter,
+): string {
+  const text = input.trim();
+  const limit = Math.max(0, Math.floor(target));
+  if (!text || limit === 0) return "";
+  if (count(text) <= limit) return text;
+  const suffix = " …";
+  let low = 0;
+  let high = text.length;
+  let best = "";
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = `${text.slice(0, middle).trimEnd()}${suffix}`;
+    if (count(candidate) <= limit) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
+}
+
 function boundedDeterministic(
   input: string,
   target: number,
   count: TokenCounter,
 ): string {
-  const limit = Math.max(1, Math.floor(target));
-  const prefix = "Archived source (deterministic fallback): ";
-  const words = input.trim() ? input.trim().split(/\s+/u) : [];
-  // Build by token count rather than character count; this guarantees the result
-  // remains bounded for counters used by the host and by tests.
-  const prose = prefix;
-  if (count(prose) > limit)
-    return prefix.split(/\s+/u).slice(0, limit).join(" ");
-  const room = Math.max(0, limit - count(prose));
-  if (words.length <= room) return prose + words.join(" ");
-  if (room <= 2) return prose + words.slice(0, room).join(" ");
-  const head = Math.ceil(room / 2);
-  const tail = room - head - 1;
-  return (
-    prose +
-    words.slice(0, head).join(" ") +
-    " … " +
-    words.slice(-Math.max(0, tail)).join(" ")
+  return boundedByTokens(
+    `Archived source (deterministic fallback): ${input.trim()}`,
+    target,
+    count,
   );
 }
 
@@ -103,10 +112,11 @@ export async function summarizeText(
   const signal = request.signal ?? new AbortController().signal;
   const target = Math.max(1, Math.floor(request.targetTokens));
   const inputTokens = count(request.input);
-  const retrieval =
-    count(RETRIEVAL_WORDING) <= target
-      ? RETRIEVAL_WORDING
-      : RETRIEVAL_WORDING.split(/\s+/u).slice(0, target).join(" ");
+  const retrieval = boundedByTokens(
+    RETRIEVAL_WORDING,
+    Math.floor(target / 4),
+    count,
+  );
   const retrievalTokens = count(retrieval);
   const candidateTarget = Math.max(1, target - retrievalTokens);
 
@@ -128,7 +138,7 @@ export async function summarizeText(
       ).trim();
       checkAbort(signal);
       const total = count(prose) + retrievalTokens;
-      if (prose && total <= target && total < inputTokens) {
+      if (prose && total <= target && count(prose) < inputTokens) {
         return { prose, retrieval, level, tokenCount: total };
       }
     } catch {

@@ -90,9 +90,14 @@ off remain OMP-controlled.
 ## Commands
 
 - `/lcm` or `/lcm help` displays command help in the OMP UI.
-- `/lcm status` shows the last renderer, generation, roots, bounded result metadata, and outcome/error status.
-- `/lcm dump` prints the same bounded diagnostic JSON, including root artifact IDs and summary preview.
-- Tab completion after `/lcm ` suggests `help`, `status`, `dump`, and `renderer`; after `/lcm renderer ` it suggests all supported renderers.
+- `/lcm version` shows the plugin version currently loaded by OMP.
+- `/lcm status` shows the last renderer, generation, roots, summary quality,
+  provider-native replay status, bounded result metadata, and outcome/error
+  status.
+- `/lcm dump` prints those diagnostics and traverses the bounded artifact DAG
+  with structural, single-line summary previews.
+- Tab completion after `/lcm ` suggests `help`, `status`, `dump`, `version`,
+  and `renderer`; after `/lcm renderer ` it suggests all supported renderers.
 - `/lcm renderer auto`
 - `/lcm renderer context-full`
 - `/lcm renderer snapcompact`
@@ -108,9 +113,36 @@ Use the registered `lcm_expand` tool for node structure and optional raw preview
 
 ## Rendering and remote behavior
 
-Context-full returns a complete custom compaction result containing portable text roots and only the plugin preserve key. Snapcompact receives a synthetic message containing current roots, never the previous raw transcript/archive, and preserves the summary-only archive across context rebuilds. A second compaction creates parent nodes while retaining the original raw artifacts transitively.
+Context-full returns a complete custom compaction result containing portable
+text roots and LCM preserve state. Snapcompact receives a synthetic message
+containing current roots, never the previous raw transcript/archive, and
+preserves the summary-only archive across context rebuilds. A second compaction
+creates parent nodes while retaining the original raw artifacts transitively.
 
-Returning a complete result from `session_before_compact` bypasses OMP local, configured remote, and provider-native compaction paths. Diagnostics call this `builtInRemoteContextFullIntercepted`; it is false for snapcompact because that flag describes only OMP's built-in remote context-full branch. If a model summary fails, the plugin converges to a deterministic bounded archival summary. If the event is aborted, the boundary is invalid, an artifact write fails, the model/key is missing, or an explicit snapcompact renderer lacks image support, the plugin notifies and returns `{ cancel: true }`; it never falls through to built-in compaction.
+Returning a complete result from `session_before_compact` bypasses OMP's
+built-in compaction call. For eligible OpenAI Responses models with remote
+compaction enabled, the plugin explicitly invokes OMP's published V1 remote
+compaction API and merges `openaiRemoteCompaction` with
+`ompLcmArtifactsV1`. OMP then materializes the replacement history as an
+`openaiResponsesHistory` provider payload on the compaction summary. A later
+compaction seeds a fresh remote request only when the preserved provider matches
+the active provider. Provider mismatch, disabled/ineligible models, missing
+credentials, empty input, and remote failure never install stale replay data;
+the textual LCM result remains usable.
+
+Exact raw artifacts retain opaque `thinkingSignature`, `encrypted_content`, and
+provider payload fields. The summary projection omits those opaque values so
+they consume no summarization tokens. `/lcm status` and `/lcm dump` report
+native replay status, provider, item count, whether prior history was seeded,
+and a bounded error. Diagnostics call the bypass
+`builtInRemoteContextFullIntercepted`; it describes interception of OMP's
+built-in branch, not whether the plugin's explicit native replay request ran.
+
+If a model summary fails, the plugin converges to a deterministic bounded
+archival summary. If the event is aborted, the boundary is invalid, an artifact
+write fails, the model/key required for textual summarization is missing, or an
+explicit snapcompact renderer lacks image support, the plugin notifies and
+returns `{ cancel: true }`; it never falls through to built-in compaction.
 
 ## Limitations
 

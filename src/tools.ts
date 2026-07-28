@@ -14,6 +14,10 @@ export interface ExpandParams {
   depth?: unknown;
   includeRaw?: unknown;
 }
+export interface ExpandRenderOptions {
+  summaryLimit?: number;
+  singleLineSummaries?: boolean;
+}
 interface LcmNode {
   schema: "omp-lcm-node/v1";
   kind: string;
@@ -36,6 +40,15 @@ function boundedText(value: string, limit: number): string {
     ? value
     : `${value.slice(0, Math.max(0, limit - 40))}\n[… output truncated; use read artifact://ID:<range> …]`;
 }
+function summaryPreview(value: string, options: ExpandRenderOptions): string {
+  const text = options.singleLineSummaries
+    ? value.replace(/\s+/gu, " ").trim()
+    : value;
+  const limit = options.summaryLimit ?? 2_000;
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
 function asNode(value: unknown): LcmNode | undefined {
   if (!value || typeof value !== "object") return undefined;
   const v = value as Record<string, unknown>;
@@ -82,6 +95,7 @@ const paramsOf = (input: unknown): ExpandParams =>
 /** Creates a registration-compatible handler; all failures become tool text. */
 export function createLcmExpandHandler(
   getContext?: (context: unknown) => ExpandToolContext | undefined,
+  renderOptions: ExpandRenderOptions = {},
 ) {
   return async function lcmExpandHandler(
     input: unknown,
@@ -152,7 +166,9 @@ export function createLcmExpandHandler(
         append(
           `${indent}Node ${artifactUri(id)} [${node.kind}, level ${node.level}]${node.sourceEntryCount === undefined ? "" : ` (${node.sourceEntryCount} source entries)`}`,
         );
-        append(`${indent}Summary: ${boundedText(node.summary, 2_000)}`);
+        append(
+          `${indent}Summary: ${summaryPreview(node.summary, renderOptions)}`,
+        );
         if (node.rawSources.length)
           append(
             `${indent}Raw sources: ${node.rawSources.map(artifactUri).join(", ")}`,
