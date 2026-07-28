@@ -1,206 +1,344 @@
-# Implementation Plan: Artifact-Backed LCM Compaction Plugin for oh-my-pi
+# PLAN: Standalone Artifact-Backed LCM Compaction Plugin for Oh My Pi
 
-## Instructions to the supervisory model
+## Supervisory instruction
 
-You are the implementation supervisor. Execute this plan in `../oh-my-pi/`. Do not reinterpret or reduce the scope. The requested deliverable is a loadable oh-my-pi extension that implements the practical LCM invariants described below for both effective `context-full` and `snapcompact` compaction, including fail-closed interception of built-in remote/provider-native context-full compaction.
+You are the implementation supervisor. Work only in the repository containing this file:
 
-Use Luna Medium workers and Luna Medium verifiers. Keep every delegated task narrow and mechanical:
+```text
+~/src/nszceta/omp-lcm-inspired-compaction/
+```
 
-- Give each worker the exact files and symbols listed in its task.
-- Give each worker the shared contracts in this document; do not ask a worker to invent an architecture.
-- A worker should normally own one module and its focused unit test, or one small core API change and its focused test.
-- Do not ask workers to run formatters, typechecking, or the full test suite. The supervisor runs validation after integrating each wave.
-- Do not ask one worker to “implement the whole plugin,” “research the architecture,” or modify more than three production files.
-- Run independent tasks in the same wave concurrently. Never run more than eight workers at once.
-- After implementation, use separate read-only Luna Medium verifiers. Give each verifier one invariant or one execution path, not the entire change.
-- Treat a verifier’s claim as untrusted until the supervisor reproduces it with the specified focused command.
-- Preserve unrelated user changes. Do not reset or rewrite unrelated files.
+All delivered plugin code, package metadata, tests, fixtures, documentation, and marketplace metadata must live in this repository. Do not create or edit files in an Oh My Pi source checkout. Do not place implementation files under `packages/coding-agent`, `packages/agent`, `packages/snapcompact`, or any other upstream directory.
 
-The implementation is incomplete unless every acceptance criterion and verification scenario in this document passes.
+Oh My Pi source may be read to verify public API behavior, but it is an external dependency and must remain unchanged. The standalone package must integrate through published/public OMP extension APIs and package dependencies.
+
+Use Luna Medium workers and Luna Medium verifiers. Keep every delegated task small and mechanical:
+
+- Give each worker the exact local files and fixed contracts from this document.
+- A worker should own one small module and its unit test, or one narrow integration test.
+- No worker may redesign the architecture or move implementation into OMP.
+- No worker should modify more than three production files.
+- Workers must skip formatters, project-wide typechecking, and the full test suite. The supervisor runs validation after integrating each wave.
+- Run independent tasks in one concurrent wave. Never run more than eight workers at once.
+- Use fresh read-only Luna Medium verifiers after implementation.
+- Preserve unrelated repository changes.
+- Do not weaken an assertion or skip a failing test to make validation pass.
+
+The result is incomplete unless every acceptance criterion in this plan is satisfied.
 
 ---
 
-## Goal
+## Required repository outcome
 
-Create a loadable extension at:
+The finished repository must be a normal standalone OMP plugin package with this shape:
 
 ```text
-packages/coding-agent/examples/extensions/lcm-compaction/
+omp-lcm-inspired-compaction/
+├── .gitignore
+├── .omp-plugin/
+│   └── marketplace.json
+├── LICENSE
+├── PLAN.md
+├── README.md
+├── biome.json
+├── package.json
+├── tsconfig.json
+├── src/
+│   ├── index.ts
+│   ├── config.ts
+│   ├── contracts.ts
+│   ├── source.ts
+│   ├── summarize.ts
+│   ├── dag.ts
+│   ├── render-context-full.ts
+│   ├── render-snapcompact.ts
+│   ├── controller.ts
+│   └── tools.ts
+└── test/
+    ├── helpers.ts
+    ├── contracts.test.ts
+    ├── source.test.ts
+    ├── summarize.test.ts
+    ├── dag.test.ts
+    ├── render-context-full.test.ts
+    ├── render-snapcompact.test.ts
+    ├── controller.test.ts
+    ├── remote-interception.test.ts
+    ├── lifecycle.test.ts
+    └── tools.test.ts
 ```
 
-The extension must replace ordinary `context-full` and `snapcompact` compaction with an artifact-backed hierarchical summary system:
+Minor fixture files under `test/fixtures/` are allowed. Do not introduce a monorepo, copy OMP source into this repository, use Git submodules, or require consumers to patch OMP.
 
-1. Exact discarded `SessionEntry` data remains recoverable in session artifacts.
-2. Active history contains concise summaries with deterministic `artifact://ID` references.
-3. Repeated compactions form a bounded hierarchy of summary-node artifacts rather than repeatedly summarizing or rasterizing the complete raw transcript.
-4. Context-full mode installs the bounded textual LCM root summary.
-5. Snapcompact mode runs public `@oh-my-pi/snapcompact.compact()` over synthetic LCM root-summary messages, so snapcompact retains summaries and artifact references instead of raw transcript text.
-6. A complete custom result returned from `session_before_compact` must short-circuit built-in local, remote-endpoint, OpenAI V1 provider-native, and OpenAI V2 streaming compaction.
-7. Once the extension accepts a compaction event, it must fail closed. It must never return `undefined` and silently fall through to built-in remote compaction.
-8. Retrieval must work with existing `read artifact://ID` and `grep ... artifact://ID`. Add a small recursive expansion tool so a model can traverse summary-node children without guessing the storage schema.
-
-This is a practical plugin-level implementation of LCM. It must implement lossless source retention, deterministic references, hierarchical summaries, bounded active roots, retrieval, and guaranteed summarization convergence. Exact paper parity for asynchronous soft-limit compaction and transactional multi-write DAG commits is outside this plugin’s available API and is explicitly not part of this change.
+The package entry point must be `./src/index.ts`. `package.json` must declare it through both `exports` and `omp.extensions`, following established standalone OMP plugin conventions.
 
 ---
 
-## Architectural context the implementers must understand
+## Product goal
 
-### LCM paper invariants
+Implement a loadable OMP extension that replaces ordinary `context-full` and `snapcompact` compaction with a practical Lossless Context Management system:
 
-`LCM_Paper_3.tex` is outside the oh-my-pi repository in `../tmp/LCM_Paper_3.tex` relative to the repository. Relevant sections are approximately lines 82–178.
+1. Preserve exact discarded OMP `SessionEntry` objects in session artifacts.
+2. Generate concise summaries of bounded source chunks.
+3. Insert `artifact://ID` references through deterministic code after summarization.
+4. Store immutable leaf and parent summary nodes as artifacts.
+5. Keep only a bounded set of root summaries in active context and compaction `preserveData`.
+6. Keep every compacted source entry transitively reachable from a current root.
+7. Render roots as plain text for context-full compaction.
+8. Render roots through public `@oh-my-pi/snapcompact` for snapcompact compaction, ensuring snapcompact retains summaries and artifact IDs rather than raw historical transcript text.
+9. Intercept built-in remote context-full compaction by returning a complete custom result from `session_before_compact` before OMP reaches its local, remote-endpoint, OpenAI V1, or OpenAI V2 compaction path.
+10. Fail closed after accepting an event so errors cannot silently fall through to built-in remote compaction.
+11. Provide a small `lcm_expand` tool for traversing node artifacts; ordinary OMP `read` and `grep` remain the source-retrieval tools.
 
-The implementation must preserve these practical invariants:
-
-- The immutable store is the source of truth. Summaries are derived views.
-- Active context contains recent raw messages plus summary nodes for older history.
-- Summary nodes form a hierarchy and retain provenance to children or raw sources.
-- Identifiers are inserted by engine code after model summarization; never trust the model to reproduce identifiers.
-- Every compacted message remains transitively reachable.
-- If an LLM summary does not shrink its input, escalate from normal to aggressive summarization and finally to a deterministic bounded fallback.
-- Large references must survive later hierarchy levels.
-
-### Existing oh-my-pi compaction interception
-
-`SessionBeforeCompactEvent` is defined in:
-
-```text
-packages/coding-agent/src/extensibility/shared-events.ts
-```
-
-It supplies:
-
-- `preparation: CompactionPreparation`
-- `branchEntries: SessionEntry[]`
-- optional `customInstructions`
-- `signal: AbortSignal`
-
-`CompactionPreparation` is defined in:
-
-```text
-packages/agent/src/compaction/compaction.ts
-```
-
-It contains:
-
-- `firstKeptEntryId`
-- `messagesToSummarize`
-- `turnPrefixMessages`
-- `recentMessages`
-- `isSplitTurn`
-- `tokensBefore`
-- `previousSummary`
-- `previousPreserveData`
-- `fileOps`
-- effective `settings`, including `strategy` and `remoteEnabled`
-
-A handler may return a complete `CompactionResult` through `SessionBeforeCompactResult.compaction`. Manual compaction honors this in `packages/coding-agent/src/session/session-maintenance.ts` around the current `session_before_compact` emission and the `compactionPrep.kind === "fromHook"` branch. Automatic compaction has the equivalent emission and branch later in the same file.
-
-Important control-flow invariant:
-
-```text
-custom result returned
-  -> compactionPrep.kind === "fromHook"
-  -> plugin result is installed
-  -> built-in snapcompact is skipped
-  -> built-in context-full compact() is skipped
-  -> remote endpoint and provider-native remote compaction are skipped
-```
-
-If the handler returns `undefined`, built-in processing resumes. Therefore `undefined` is forbidden after this plugin decides to handle an event.
-
-### Remote context-full behavior that must be intercepted
-
-Built-in context-full remote routing lives in:
-
-```text
-packages/agent/src/compaction/compaction.ts
-```
-
-Current paths include:
-
-- configured `remoteEndpoint`
-- OpenAI V2 streaming compaction when `remoteEnabled !== false`
-- OpenAI V1 provider-native compaction when `remoteEnabled !== false`
-- local summarization fallback
-
-The plugin does not need to patch or intercept HTTP. Returning a complete result before core calls `compact()` is the correct interception point. Tests must prove the built-in remote request functions are never reached.
-
-The plugin’s own ordinary LLM summary request is not “built-in remote compaction.” It may use the active model through `complete()`, following the existing `examples/hooks/custom-compaction.ts` pattern. Do not select a different provider by default. Use the current model and current model’s API key.
-
-### Artifact behavior
-
-`ExtensionContext.sessionManager` exposes `saveArtifact`, `getArtifactPath`, and `getArtifactManager`. Artifacts:
-
-- have numeric session-scoped IDs;
-- resume from the next unused ID;
-- are shared by a parent and its subagent tree;
-- resolve as `artifact://ID` within the calling session;
-- support `read` selectors and path-only grep/search.
-
-Relevant sources:
-
-```text
-packages/coding-agent/src/session/session-manager.ts
-packages/coding-agent/src/session/artifacts.ts
-packages/coding-agent/src/internal-urls/artifact-protocol.ts
-```
-
-Never invent artifact IDs. Obtain every ID from `saveArtifact()` and append references only after the save succeeds.
-
-### Snapcompact behavior
-
-The public package exports `compact`, `getPreservedArchive`, and archive helpers:
-
-```text
-packages/snapcompact/src/index.ts
-packages/snapcompact/src/snapcompact.ts
-```
-
-Snapcompact normally unfolds its previous archive source and rerenders it with newly discarded raw history. The plugin must prevent this. For each LCM snapcompact pass:
-
-- build synthetic messages containing only bounded LCM root summaries and root artifact references;
-- pass previous preserve data containing only the LCM state, not the prior snapcompact archive or provider-native remote history;
-- call public `snapcompact.compact()`;
-- return its result with the LCM state retained in `preserveData`.
-
-Snapcompact spreads unrelated previous preserve keys into its result. Supplying only the LCM key ensures a fresh summary-only archive and removes old raw snapcompact/remote payloads.
-
-OMP reattaches a valid snapcompact archive on every context rebuild in:
-
-```text
-packages/coding-agent/src/session/session-context.ts
-```
-
-### Strategies in and out of scope
-
-Supported effective actions:
-
-- `context-full`
-- `snapcompact`
-
-Not supported by this plugin version:
-
-- successful `handoff`, because it runs before `session_before_compact`;
-- successful `shake`, because it performs its own artifact-backed rewrite and returns before the ordinary compaction hook;
-- `off`, because it produces no compaction event.
-
-Document that users must configure `context-full` or `snapcompact` for automatic LCM maintenance. Shake fallback and failed handoff may eventually enter context-full, but this is fallback behavior, not primary support.
+This plugin implements the practical LCM invariants available through the current public OMP API. It does not claim exact parity with asynchronous or transactional features unavailable to a standalone extension.
 
 ---
 
-## Fixed data contracts
+## Non-negotiable standalone boundary
 
-All workers must use these contracts. A worker may add comments or narrow helper types but must not redesign them.
+### Allowed
 
-### Preserve-data key
+- Import public APIs from published OMP packages.
+- Depend on `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-agent-core`, `@oh-my-pi/pi-ai`, and `@oh-my-pi/snapcompact` as required.
+- Read upstream source or installed package source to confirm signatures.
+- Use `session_before_compact`, `ExtensionContext.sessionManager`, plugin settings APIs, commands, flags, and `registerTool`.
+- Build integration tests in this repository against the OMP package listed in `devDependencies`.
+
+### Forbidden
+
+- Editing an OMP checkout.
+- Adding fields to `SessionBeforeCompactEvent` in OMP.
+- Adding a new OMP compaction strategy enum.
+- Adding tests to OMP’s test directories.
+- Monkey-patching OMP or snapcompact internals.
+- Patching HTTP clients to stop remote compaction.
+- Depending on unpublished local relative imports such as `../oh-my-pi/packages/...`.
+- Requiring users to copy files manually into the OMP package.
+
+The remote interception mechanism is the existing custom compaction result. The plugin must not require any core change.
+
+---
+
+## OMP behavior this standalone plugin relies on
+
+The following context is included so workers do not need to rediscover the architecture.
+
+### Compaction hook
+
+OMP emits `session_before_compact` for ordinary manual and automatic compaction. The event provides:
 
 ```ts
-export const LCM_PRESERVE_KEY = "ompLcmArtifactsV1";
+interface SessionBeforeCompactEvent {
+  type: "session_before_compact";
+  preparation: CompactionPreparation;
+  branchEntries: SessionEntry[];
+  customInstructions?: string;
+  signal: AbortSignal;
+}
 ```
 
-Do not use the snapcompact preserve key and do not reuse provider-native compaction keys.
+The preparation includes:
 
-### Bounded persisted state
+```ts
+interface CompactionPreparation {
+  firstKeptEntryId: string;
+  messagesToSummarize: AgentMessage[];
+  turnPrefixMessages: AgentMessage[];
+  recentMessages: AgentMessage[];
+  isSplitTurn: boolean;
+  tokensBefore: number;
+  previousSummary?: string;
+  previousPreserveData?: Record<string, unknown>;
+  fileOps: FileOperations;
+  settings: CompactionSettings;
+}
+```
+
+`preparation.settings` contains the effective invocation settings, including `strategy` and `remoteEnabled`. Manual `/compact soft`, `/compact remote`, and `/compact snapcompact` overrides are reflected in the preparation settings.
+
+A handler may return:
+
+```ts
+{ cancel: true }
+```
+
+or:
+
+```ts
+{ compaction: CompactionResult }
+```
+
+A complete custom result causes OMP to install that result and skip its built-in snapcompact and context-full `compact()` calls. Skipping context-full `compact()` also skips:
+
+- configured remote endpoint compaction;
+- provider-native OpenAI V1 compaction;
+- provider-native OpenAI V2 streaming compaction;
+- built-in local summary fallback.
+
+If the handler returns `undefined`, OMP resumes built-in compaction. Therefore this plugin must never return `undefined` after deciding to handle the event.
+
+### Strategy selection without core changes
+
+The event does not expose a separate final `action` field. The plugin must select its renderer using available public information:
+
+1. Plugin setting `renderer=context-full`: always use text roots.
+2. Plugin setting `renderer=snapcompact`: use snapcompact only if `ctx.model` accepts image input; otherwise cancel before writing artifacts.
+3. Plugin setting `renderer=auto`:
+   - use snapcompact when `preparation.settings.strategy === "snapcompact"`, the current model accepts image input, and `event.customInstructions` is absent;
+   - otherwise use context-full.
+
+This mirrors the relevant public behavior without changing OMP. An internal OMP guidance value is not exposed to extensions. Document that `renderer=auto` cannot observe hidden internal-guidance overrides; users needing deterministic behavior should set the plugin renderer explicitly.
+
+Successful `handoff` and `shake` execute outside or before the ordinary custom compaction result path. They are not primary supported strategies. `off` emits no compaction. Document that automatic LCM requires OMP strategy `context-full` or `snapcompact`.
+
+### Artifact API
+
+`ExtensionContext.sessionManager` exposes public methods needed by the plugin:
+
+- `saveArtifact(content, toolType)`
+- `getArtifactPath(id)`
+- `getArtifactManager()`
+- `getBranch()` and other read-only session methods
+
+Artifact IDs are numeric strings, sequential within a session, resume-safe, and shared by a parent/subagent tree. `artifact://ID` resolution is pinned to the calling session. Existing OMP tools support selectors and path-only search against artifacts.
+
+Never predict an ID. Save first, receive the ID, validate it, then append the reference.
+
+### Snapcompact API
+
+Use the public package, not internal source paths:
+
+```ts
+import {
+  archiveSourceText,
+  compact,
+  getPreservedArchive,
+} from "@oh-my-pi/snapcompact";
+```
+
+Snapcompact normally unfolds its previous archive source and combines it with newly discarded history. The plugin must prevent raw-history replay by giving snapcompact a synthetic preparation whose messages contain only current LCM root summaries and references, and whose `previousPreserveData` contains only the plugin’s bounded LCM key.
+
+OMP will reattach a valid returned snapcompact archive on later context rebuilds.
+
+### Plugin settings API
+
+Use standalone plugin metadata in `package.json` and public helpers:
+
+```ts
+import {
+  getPluginSettings,
+  PluginManager,
+} from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
+```
+
+Follow the same package-level pattern as other standalone OMP plugins: settings are declared under `package.json#omp.settings`, read using the plugin name and `ctx.cwd`, and changed through `PluginManager` when `/lcm renderer ...` is used.
+
+---
+
+## LCM invariants implemented by this plugin
+
+The original LCM method distinguishes an immutable source store from active summaries. This plugin maps those concepts as follows:
+
+| LCM concept | Standalone plugin implementation |
+|---|---|
+| Immutable message store | Exact JSONL session artifacts written before summary-node installation |
+| Active context | Recent raw OMP messages plus bounded LCM root summaries |
+| Leaf | Summary-node artifact pointing to one or more raw artifacts |
+| Hierarchy | Parent node artifact pointing to child node artifact IDs |
+| Stable identifier | Numeric session artifact ID rendered as `artifact://ID` |
+| Deterministic retrievability | Plugin code appends root/source references after model output |
+| Expansion | `lcm_expand` plus ordinary `read artifact://ID` |
+| Exact search | Ordinary OMP grep/search against raw artifact URI/path |
+| Guaranteed convergence | Normal, aggressive, then deterministic bounded fallback |
+
+Required invariants:
+
+- Summaries are derived views, never the sole source of truth.
+- Every discarded source entry remains transitively reachable from an active root.
+- The model is never responsible for copying an artifact ID correctly.
+- Repeated compaction creates parent nodes rather than flattening and losing old provenance.
+- Active root count and preserve-data size remain bounded.
+- Failure after accepting a hook event cannot invoke built-in remote compaction.
+
+Unavailable exact-paper features, explicitly out of scope:
+
+- asynchronous soft-threshold compaction;
+- atomic background summary installation;
+- transactional commit spanning several artifact writes and OMP’s compaction entry;
+- globally unique artifact IDs across sessions;
+- automatic pre-handoff source injection;
+- automatic shake-region summary callbacks.
+
+Partial writes may leave orphan artifacts. The plugin must never install a node that references an artifact write that failed.
+
+---
+
+## Package contract
+
+Create `package.json` with this minimum shape. Resolve the exact compatible version from the currently published/available OMP package before installation, but keep all OMP packages on the same compatible version range.
+
+```json
+{
+  "name": "omp-lcm-inspired-compaction",
+  "version": "0.1.0",
+  "description": "Artifact-backed hierarchical LCM-inspired compaction for Oh My Pi",
+  "type": "module",
+  "license": "MIT",
+  "files": ["src", "README.md", "LICENSE"],
+  "exports": "./src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "biome check .",
+    "format": "biome format --write .",
+    "pack": "bun pm pack"
+  },
+  "omp": {
+    "extensions": ["./src/index.ts"],
+    "settings": {
+      "renderer": {
+        "type": "enum",
+        "description": "LCM root renderer",
+        "values": ["auto", "context-full", "snapcompact"],
+        "default": "auto"
+      }
+    }
+  }
+}
+```
+
+Dependency roles:
+
+- `@oh-my-pi/pi-coding-agent`: peer and dev dependency; extension types, plugin settings, session API.
+- `@oh-my-pi/pi-agent-core`: runtime dependency only if token counting or public compaction types are imported at runtime; otherwise dev/peer as appropriate.
+- `@oh-my-pi/pi-ai`: runtime dependency for `complete()` and model/message types.
+- `@oh-my-pi/snapcompact`: runtime dependency for summary-only snapcompact rendering.
+- `typescript`, `@types/bun`, and `@biomejs/biome`: dev dependencies.
+
+Do not add a dependency on a filesystem checkout. Produce and inspect `bun pm pack` output before completion; the tarball must contain the extension source and documentation and must not contain tests, local artifacts, sessions, or copied OMP source.
+
+Create `.omp-plugin/marketplace.json` naming `nszceta/omp-lcm-inspired-compaction` as the GitHub source and repository.
+
+---
+
+## Fixed plugin data contracts
+
+All workers must use these contracts. Do not reopen their design.
+
+### Constants
+
+```ts
+export const PLUGIN_NAME = "omp-lcm-inspired-compaction";
+export const LCM_PRESERVE_KEY = "ompLcmArtifactsV1";
+export const MAX_ACTIVE_ROOTS = 4;
+export const RAW_CHUNK_TARGET_TOKENS = 12_000;
+export const ROOT_SUMMARY_TARGET_TOKENS = 2_048;
+export const SNAPCOMPACT_MAX_FRAMES = 4;
+```
+
+For models with small context windows, lower raw summary chunks to no more than one eighth of `ctx.model.contextWindow`, with a minimum target of 2,048 and maximum of 12,000.
+
+### Preserve state
 
 ```ts
 export interface LcmPreserveStateV1 {
@@ -218,23 +356,19 @@ export interface LcmRootRef {
 }
 ```
 
-Only active roots belong in `preserveData`. Do not store the entire DAG or an ever-growing list of archived entry IDs in session JSONL. Child provenance lives inside immutable node artifacts.
+Only current roots are stored in `preserveData`. Never persist the whole DAG or an ever-growing set of entry IDs there. Child provenance is stored inside immutable artifacts.
 
-Validate all unknown previous preserve data. An invalid or unknown version is treated as absent and must not crash compaction.
+Parse previous state defensively from unknown input. Invalid version, invalid roots, nonnumeric IDs, or unreasonable values produce “no prior LCM state,” not a crash.
 
 ### Raw artifact
 
-Tool type: `lcm-raw`
+Tool type: `lcm-raw`.
 
-Content: UTF-8 JSONL. Each line is `JSON.stringify(sessionEntry)` for one exact source `SessionEntry`. Do not normalize, summarize, omit tool results, or rewrite fields before persistence.
+Content: UTF-8 JSONL, one exact `JSON.stringify(sessionEntry)` per line. Do not rewrite roles, tool results, timestamps, IDs, or message content.
 
-A raw artifact may contain multiple entries, but chunk it so one summary request remains bounded. Raw artifacts themselves may be read with selectors if large.
+### Node artifact
 
-### Summary-node artifact
-
-Tool type: `lcm-node`
-
-Content is formatted JSON:
+Tool type: `lcm-node`.
 
 ```ts
 export interface LcmNodeArtifactV1 {
@@ -250,429 +384,635 @@ export interface LcmNodeArtifactV1 {
 }
 ```
 
-Rules:
+- IDs inside `children` and `rawSources` are numeric strings without `artifact://`.
+- Leaf nodes point to raw artifacts and have no children.
+- Condensed nodes point to child node artifacts.
+- Legacy nodes map a pre-plugin `previousSummary` to raw artifacts captured on first activation.
+- The model supplies only `summary` prose.
+- Plugin code writes all ID arrays and model-visible retrieval lines.
+- Tests ignore the exact `createdAt` value.
 
-- `children`, `rawSources`, and all exposed IDs are numeric artifact IDs without the URI prefix.
-- A leaf has one or more `rawSources` and no children.
-- A condensed node has children and normally no direct raw sources.
-- A legacy node may preserve `previousSummary` while its corresponding raw entries are archived during first activation.
-- `summary` is model prose only. Retrieval lines are formatted by deterministic code outside the model.
-- `createdAt` is informational; tests must not compare its exact value.
+### Model-visible roots
 
-### Model-visible root format
-
-Use one deterministic formatter everywhere:
+Use a single deterministic formatter:
 
 ```text
 ## Retained LCM history
 
 ### Root 1
 <summary prose>
-Expand node: artifact://<root artifact id>
+Expand node: artifact://<node id>
 
 ### Root 2
-...
+<summary prose>
+Expand node: artifact://<node id>
 
-Retrieval: use `read artifact://ID`; recursively inspect `children` and `rawSources`. Use `grep` against an artifact URI when searching exact retained text.
+Retrieval: use `lcm_expand` for node structure, `read artifact://ID` for exact content, and grep/search against artifact URIs for exact matches.
 ```
 
-The formatter appends every `Expand node:` line after model output. The model must never be asked to reproduce artifact IDs.
+Never place a raw list of many child IDs into active context. The root node artifact contains that list; active text needs only the root ID.
 
-### Bounds
+---
 
-Use exported constants so tests can override them:
+## Exact source-selection algorithm
+
+Implement this in `src/source.ts` without changing OMP.
+
+1. Locate `preparation.firstKeptEntryId` in `event.branchEntries`. If absent, return a typed boundary error.
+2. Parse LCM state from `preparation.previousPreserveData?.[LCM_PRESERVE_KEY]`.
+3. If valid prior LCM state exists, search backward before the keep boundary for the latest compaction entry whose preserve data contains the same LCM generation. Capture after that entry.
+4. If no valid prior LCM state exists, capture from the beginning of the branch. This first run intentionally captures raw entries covered by earlier non-LCM compactions because OMP branch history still retains those entries.
+5. End immediately before the keep boundary. This covers fully discarded messages and a discarded split-turn prefix.
+6. Exclude prior compaction entries themselves from raw JSONL. Preserve conversational entries, tool results, custom messages, and branch summaries. Administrative entries may be omitted only when a focused unit test explicitly justifies the omission.
+7. Never capture entries at or after `firstKeptEntryId`; those are recent active history.
+8. Chunk the exact-entry slice in stable order by estimated serialized token count. Do not split one `SessionEntry` between raw artifacts.
+9. Save every raw chunk before creating a node that references it.
+10. Use `preparation.messagesToSummarize` plus `turnPrefixMessages` as the new LLM summary input. On first activation, also incorporate `preparation.previousSummary` as a legacy map for older already-compacted source.
+
+If preparation contains discarded messages but source capture is empty, cancel. This is a boundary error, not permission to fall back to built-in compaction.
+
+---
+
+## Summary and convergence contract
+
+Implement in `src/summarize.ts` with dependency injection for tests.
+
+### Default model call
+
+Use the current OMP model and its key:
 
 ```ts
-MAX_ACTIVE_ROOTS = 4
-RAW_CHUNK_TARGET_TOKENS = 12_000
-ROOT_SUMMARY_TARGET_TOKENS = 2_048
-SNAPCOMPACT_MAX_FRAMES = 4
+const model = ctx.model;
+const apiKey = await ctx.modelRegistry.getApiKey(model);
+const response = await complete(model, request, {
+  apiKey,
+  maxTokens: target,
+  signal: event.signal,
+});
 ```
 
-If the current model context window is small, lower the raw chunk target to at most one eighth of the context window, with a floor of 2,048 tokens. Do not increase it above 12,000.
+Follow the public API signature installed in this repository. Do not select a cheaper or different provider automatically. The user chose the active model.
 
-### Convergence
+The direct summary request may use a hosted model. “Remote interception” in this plan means disabling OMP’s built-in remote/provider-native compaction path, not eliminating all network traffic.
 
-Every summary operation follows exactly three levels:
+### Three levels
 
-1. Normal: detailed structured summary with a target token budget.
-2. Aggressive: terse bullet summary with half the normal target.
-3. Deterministic fallback: no LLM call; return a bounded statement that the content is archived and can be expanded through the node/raw artifact. It may retain a bounded head/tail excerpt, but mandatory retrieval references take priority.
+For every leaf or parent summary:
 
-Measure the candidate after deterministic retrieval text is included. Accept it only if it is smaller than the input and within target. Level 3 must always terminate within target. If mandatory metadata alone exceeds target, place the full list inside the node artifact and keep only the single parent artifact reference in model-visible text.
+1. **Normal:** structured, detail-preserving summary targeting the requested token count.
+2. **Aggressive:** terse bullet summary targeting half the normal count.
+3. **Deterministic:** no LLM call; emit a bounded archival statement and optional bounded head/tail excerpt.
 
----
+Measure the candidate after mandatory deterministic retrieval wording is added. Accept an LLM candidate only when it is smaller than input and within target. Two oversized, empty, errored, or non-shrinking attempts reach deterministic fallback.
 
-## Source selection algorithm
+Abort is different from summary failure. If the signal is aborted, stop and cancel; do not run further levels.
 
-Implement this exactly so first activation and repeated compaction are both recoverable.
+The deterministic level must always fit. If provenance would be long, store it in the node and expose only one root/node artifact reference.
 
-1. Find the index of `preparation.firstKeptEntryId` in `branchEntries`. Abort the plugin compaction if it is missing.
-2. Parse `preparation.previousPreserveData[LCM_PRESERVE_KEY]`.
-3. If valid LCM state exists, find the latest compaction entry before the keep boundary whose preserve data contains that same LCM generation. Start new exact-source capture immediately after that compaction entry.
-4. If no valid LCM state exists, start at the beginning of the branch. This first activation intentionally archives source entries covered by earlier non-LCM summaries, because the session branch still contains the raw entries.
-5. End immediately before the keep boundary. This includes both ordinary discarded messages and a discarded split-turn prefix.
-6. Keep exact entries in the raw artifact, including tool results and relevant custom/branch-summary entries. Administrative entries that cannot affect conversational history may be omitted only if a focused unit test names and justifies each omitted type. The safe default is to preserve the complete slice except prior compaction entries.
-7. Use `preparation.messagesToSummarize` plus `turnPrefixMessages` as the model-summary source for newly discarded conversational content. On first activation, include `preparation.previousSummary` as a legacy summary input so older already-compacted history has a useful map while its exact branch entries are archived.
-8. Do not include `recentMessages` in raw artifacts or summaries. They remain active after `firstKeptEntryId`.
+Prompts must request these categories without requesting IDs:
 
-If source capture is empty while preparation has messages to summarize, fail closed; this indicates a boundary bug.
+- goals and user intent;
+- decisions and rationale;
+- files, symbols, commands, and observed results;
+- errors, blockers, and unresolved risks;
+- current state and next actions;
+- facts needed to continue accurately.
 
----
-
-## Plugin request and failure policy
-
-### Enablement
-
-Loading this dedicated extension enables it. Do not require a second hidden setting. Register:
-
-- `--lcm-renderer` string flag with default `auto`; valid values are `auto`, `context-full`, `snapcompact`.
-- `/lcm-status` command that reports generation, root count, renderer, and whether the last compaction intercepted a remotely enabled context-full request.
-
-Renderer selection:
-
-- `context-full`: always emit textual LCM roots.
-- `snapcompact`: always render synthetic roots through snapcompact; reject use with a non-vision active model before artifact writes.
-- `auto`: use the effective compaction action supplied by the core hook metadata added in Task 1.
-
-### Fail closed
-
-Once the extension handles an event:
-
-- success returns `{ compaction: result }`;
-- user abort returns `{ cancel: true }`;
-- invalid boundary, artifact failure, invalid renderer/model combination, or unrecoverable implementation error returns `{ cancel: true }` after a concise UI error notice;
-- it never returns `undefined`;
-- LLM summary failure is not unrecoverable: continue to the aggressive attempt and then deterministic fallback;
-- do not merge previous provider-native or snapcompact preserve payloads into the custom result.
-
-This policy prevents accidental fallthrough to built-in remote compaction. Automatic cancellation may leave the context near its limit, but silently invoking a prohibited remote compaction is worse and violates the requested invariant.
-
-### Abort handling
-
-Pass `event.signal` to every LLM call and check it:
-
-- before every artifact write;
-- after every awaited write;
-- before and after every summary request;
-- before returning the compaction result.
-
-An abort does not trigger deterministic fallback; it cancels.
+Artifact IDs are appended after the response by deterministic code.
 
 ---
 
-## Minimal core hook metadata change
+## DAG construction contract
 
-The plugin must know the effective action after manual overrides and automatic fallbacks. Add these fields to `SessionBeforeCompactEvent`:
+Implement in `src/dag.ts`.
+
+### Leaf generation
+
+For each bounded new source chunk:
+
+1. Save exact JSONL as `lcm-raw` and receive its numeric ID.
+2. Summarize the corresponding bounded conversational text.
+3. Save an `omp-lcm-node/v1` leaf containing summary prose, raw source IDs, and exact source entry IDs.
+4. Receive the node artifact ID.
+5. Add a root descriptor only after both writes succeed.
+
+On first activation with a non-LCM `previousSummary`, create a legacy node whose summary is the previous summary and whose raw sources cover the older exact captured entries. Do not ask an LLM to recreate information already represented by the previous summary.
+
+### Condensation
+
+Combine prior roots and new roots in chronological order. While there are more than four roots or formatted roots exceed `ROOT_SUMMARY_TARGET_TOKENS`:
+
+1. Take the oldest bounded group, at most four roots.
+2. Summarize their prose without loading raw source.
+3. Save a condensed node containing the child node artifact IDs.
+4. Replace those roots with the new parent root.
+5. Repeat until bounds hold.
+
+The previous child nodes remain immutable and reachable. Preserve data contains only final roots.
+
+### Write safety
+
+Artifact writes and OMP compaction installation are not transactional. Enforce the safe direction:
+
+- A failed raw write cannot produce a leaf.
+- A failed leaf write cannot produce an active root.
+- A failed parent write cannot replace its children.
+- A later failure may orphan already-written artifacts, but the handler cancels and installs no partial state.
+
+---
+
+## Renderer contracts
+
+### Context-full renderer
+
+`src/render-context-full.ts` returns a complete OMP `CompactionResult`:
+
+- `summary`: deterministic formatted roots;
+- `shortSummary`: concise count of roots and archived source entries;
+- `firstKeptEntryId`: copied exactly from preparation;
+- `tokensBefore`: copied exactly from preparation;
+- `details`: optional bounded LCM statistics;
+- `preserveData`: exactly `{ [LCM_PRESERVE_KEY]: state }`.
+
+Do not merge old snapcompact or provider-native remote preserve data. The resulting textual root is portable across providers.
+
+### Snapcompact renderer
+
+`src/render-snapcompact.ts` must:
+
+1. Reject a non-vision model before writes when snapcompact is explicitly required.
+2. Format current LCM roots.
+3. Construct one synthetic text message containing only those roots and retrieval instructions.
+4. Construct a public snapcompact preparation using original `firstKeptEntryId`, `tokensBefore`, and file operations, empty prefix messages, and no raw transcript messages.
+5. Set synthetic `previousPreserveData` to exactly `{ [LCM_PRESERVE_KEY]: state }`.
+6. Call public snapcompact `compact()` with `maxFrames: 4` and the active model.
+7. Return the snapcompact result. Its preserve data must contain the new snapcompact archive plus the same LCM state.
+
+Never pass `preparation.previousPreserveData` directly. That could unfold an old raw snapcompact archive or retain provider-native replacement history.
+
+A second LCM snapcompact pass must reconstruct synthetic source from current roots and again omit the previous archive. Snapcompact must never rerasterize old raw transcript.
+
+---
+
+## Remote interception and fail-closed behavior
+
+Implement in `src/controller.ts`.
+
+### Event acceptance
+
+The extension handles every `session_before_compact` event while loaded. It does not return `undefined`.
+
+- Success: return `{ compaction: result }`.
+- User abort: return `{ cancel: true }`.
+- Missing model or API key: notify and return `{ cancel: true }`.
+- Boundary or state error: notify and return `{ cancel: true }`.
+- Artifact write failure: notify and return `{ cancel: true }`.
+- Explicit snapcompact with non-vision model: notify and return `{ cancel: true }`.
+- Model summary failure: escalate and use deterministic fallback; do not cancel unless aborted.
+- Unexpected exception: notify, log, and return `{ cancel: true }`.
+
+This guarantees OMP cannot continue to built-in local or remote compaction after the plugin accepts the event.
+
+### Remote observability
+
+Track bounded in-memory status for `/lcm status`:
 
 ```ts
-trigger: "manual" | "automatic";
-action: "context-full" | "snapcompact";
-remoteEnabled: boolean;
+interface LcmRuntimeStatus {
+  lastRenderer?: "context-full" | "snapcompact";
+  lastGeneration?: number;
+  lastRootCount?: number;
+  lastRemoteEnabledIntercepted?: boolean;
+  lastOutcome?: "success" | "cancelled";
+  lastError?: string;
+}
 ```
 
-Rules:
+Set `lastRemoteEnabledIntercepted` when the handled preparation has `settings.remoteEnabled !== false` and the selected renderer is context-full. Do not persist API keys, prompts, raw source, or unbounded errors in status.
 
-- Manual `action` is the action core would execute without a custom result, after `/compact` mode overrides, directed-summary rules, and model capability checks.
-- Automatic `action` is the existing local `action` value after successful handoff has been excluded and after non-vision snapcompact has fallen back to context-full.
-- `remoteEnabled` is the effective settings value for that invocation. It is informational when action is snapcompact.
-- Do not add handoff or shake to this hook’s `action`; successful handoff and shake do not emit this event.
-- Update both hook and extension event typings because they share `shared-events.ts`.
-- Add focused tests proving the fields for manual context-full, manual remote, manual snapcompact, automatic context-full, and automatic snapcompact/non-vision fallback.
+### Settings and command
 
-Do not add a new compaction strategy enum. The extension intercepts existing actions.
+`src/config.ts` reads `renderer` from `getPluginSettings(PLUGIN_NAME, ctx.cwd)` and validates unknown values.
+
+Register:
+
+```text
+/lcm status
+/lcm renderer auto
+/lcm renderer context-full
+/lcm renderer snapcompact
+```
+
+Persist renderer changes through `PluginManager`. If persistence fails, report the error; do not pretend it was saved.
 
 ---
 
-## Implementation waves and Luna-sized tasks
+## Retrieval tool contract
 
-The supervisor must initialize a todo list containing every task below. Tasks in the same wave may run concurrently only when their listed dependencies are complete.
+Register one extension tool in `src/tools.ts`:
 
-### Wave 1: core event contract
+```text
+lcm_expand
+```
 
-#### Task 1 — Add effective compaction metadata
+Parameters:
 
-**Files:**
+- `artifactId`: numeric string;
+- `depth`: integer with a small maximum, default 1;
+- `includeRaw`: boolean, default false.
 
-- `packages/coding-agent/src/extensibility/shared-events.ts`
-- `packages/coding-agent/src/session/session-maintenance.ts`
-- one focused existing compaction lifecycle/hook test file
+Behavior:
 
-**Change:** Add `trigger`, `action`, and `remoteEnabled` to `SessionBeforeCompactEvent`; populate them at both manual and automatic emit sites. Refactor only enough to compute manual intended action before emission. Preserve current behavior when no handler exists.
+1. Resolve through `ctx.sessionManager.getArtifactPath`; never scan other sessions.
+2. Parse only `schema: "omp-lcm-node/v1"` as a node.
+3. Emit node summary, `artifact://` child links, and `artifact://` raw source links.
+4. Recursively inspect child nodes up to `depth`.
+5. Detect cycles defensively.
+6. Do not inline raw artifact content unless `includeRaw=true`.
+7. Even with `includeRaw=true`, bound output and direct the model to `read artifact://ID:<range>` for large content.
+8. On malformed or missing artifacts, return a useful error without throwing outside the tool.
 
-**Acceptance:** Typechecking succeeds; focused tests observe correct metadata; no strategy routing behavior changes.
+Exact retrieval and search remain ordinary OMP operations:
 
-### Wave 2: independent plugin foundations
-
-Run Tasks 2, 3, and 4 concurrently after Task 1.
-
-#### Task 2 — Define schemas and deterministic formatting
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/types.ts`
-- `packages/coding-agent/test/lcm-compaction-types.test.ts`
-
-**Change:** Implement the fixed data contracts, safe unknown-state parser, root formatter, artifact URI formatter, constants, and renderer flag parser. The parser rejects malformed versions and nonnumeric artifact IDs without throwing.
-
-**Acceptance:** Unit tests cover valid state, invalid state, deterministic root order, and programmatic artifact lines.
-
-#### Task 3 — Capture and chunk exact source entries
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/source.ts`
-- `packages/coding-agent/test/lcm-compaction-source.test.ts`
-
-**Change:** Implement the source selection algorithm, JSONL serialization, and token-bounded chunk planning. Make artifact saving a dependency passed into the function so tests use an in-memory fake. Do not summarize in this module.
-
-**Acceptance:** Tests cover first activation, repeated LCM compaction, split-turn prefix, exclusion of recent entries, exact JSONL round-trip, missing boundary failure, and stable chunk order.
-
-#### Task 4 — Implement three-level summarization
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/summarizer.ts`
-- `packages/coding-agent/test/lcm-compaction-summarizer.test.ts`
-
-**Change:** Implement normal, aggressive, and deterministic convergence. Inject the model-call function and token counter. Return prose separately from deterministic provenance/retrieval formatting.
-
-**Acceptance:** Tests prove normal success, aggressive escalation after non-shrinking output, deterministic fallback after two failures or oversized outputs, target bound, reference retention, and abort propagation.
-
-### Wave 3: DAG and renderers
-
-Run Tasks 5, 6, and 7 concurrently after Wave 2 contracts pass.
-
-#### Task 5 — Build and condense the artifact DAG
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/dag.ts`
-- `packages/coding-agent/test/lcm-compaction-dag.test.ts`
-
-**Change:** Combine previous roots with new leaf nodes, save immutable node artifacts, and condense oldest roots until at most `MAX_ACTIVE_ROOTS` remain and formatted roots fit the target. Parent nodes contain child artifact IDs. Active state contains only bounded root descriptors.
-
-**Acceptance:** Tests prove every raw artifact is reachable from a root, root count remains bounded across at least ten simulated generations, child order is stable, preserve state does not grow with total node count, and parent visible text contains a single deterministic parent reference.
-
-#### Task 6 — Implement context-full renderer
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/render-context-full.ts`
-- `packages/coding-agent/test/lcm-compaction-context-full.test.ts`
-
-**Change:** Convert bounded roots into a `CompactionResult`. Preserve `firstKeptEntryId` and `tokensBefore`. Return only `LCM_PRESERVE_KEY` state. Never carry prior snapcompact, OpenAI remote, or V2 preserve payloads.
-
-**Acceptance:** Tests seed all three kinds of old preserve payload and prove the result contains only valid LCM state; summary contains root artifact references; recent-message boundary values are unchanged.
-
-#### Task 7 — Implement snapcompact renderer
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/render-snapcompact.ts`
-- `packages/coding-agent/test/lcm-compaction-snapcompact.test.ts`
-
-**Change:** Build a synthetic snapcompact preparation containing only formatted LCM roots. Pass previous preserve data containing only `LCM_PRESERVE_KEY`. Use public `@oh-my-pi/snapcompact.compact()` with `SNAPCOMPACT_MAX_FRAMES`. Return its archive plus LCM state.
-
-**Acceptance:** `archiveSourceText(getPreservedArchive(result.preserveData))` contains summary markers and `artifact://` references, does not contain a unique raw-history sentinel, and does not contain old snapcompact or provider-native preserve content. A second render uses current roots rather than unfolding the previous archive.
-
-### Wave 4: extension assembly and retrieval
-
-Tasks 8 and 9 may run concurrently after Wave 3.
-
-#### Task 8 — Assemble the extension handler
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/index.ts`
-- `packages/coding-agent/test/lcm-compaction-extension.test.ts`
-
-**Change:** Register flags, `/lcm-status`, and `session_before_compact`. Use current `ctx.model`, `ctx.modelRegistry.getApiKey`, `complete()`, the event signal, and the completed source/summarizer/DAG/render modules. Select renderer from the fixed policy. Implement fail-closed behavior and concise UI notices. Export a factory with injected summarizer dependencies for tests; default export wires real OMP APIs.
-
-**Acceptance:** Tests cover successful context-full, successful snapcompact, no model/key, artifact failure, abort, invalid renderer, and status output. Every handled failure returns cancel rather than undefined.
-
-#### Task 9 — Add recursive expansion tool
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/lcm-compaction/tools.ts`
-- `packages/coding-agent/test/lcm-compaction-tools.test.ts`
-
-**Change:** Register `lcm_expand` with numeric `artifactId` and bounded `depth` parameters. Resolve artifacts only through the calling session manager. Parse only `omp-lcm-node/v1`; display the node summary and recursively list child/raw `artifact://` references. Detect cycles defensively even though valid state is a DAG. Do not materialize raw artifacts unless explicitly requested by the tool parameter.
-
-**Acceptance:** Tests cover leaf, condensed parent, depth limit, missing artifact, malformed node, and cycle defense. Tool output tells the model to use ordinary `read`/`grep` for exact raw content.
-
-### Wave 5: end-to-end interception and persistence tests
-
-Run Tasks 10 and 11 concurrently after the assembled extension exists.
-
-#### Task 10 — Prove remote compaction interception
-
-**Files:**
-
-- `packages/coding-agent/test/lcm-compaction-remote-interception.test.ts`
-
-**Change:** Use the existing AgentSession/extension test harness. Configure effective context-full remote compaction, including a provider-native eligible model or a remote endpoint stub. Inject a deterministic plugin summarizer so its own model call is not counted. Make the built-in remote request/fetch stub throw or increment a counter if called.
-
-Test all of:
-
-1. manual configured remote-enabled context-full;
-2. explicit `/compact remote`/equivalent one-off mode;
-3. automatic remote-enabled context-full;
-4. plugin summarizer failure followed by deterministic fallback;
-5. artifact failure or abort.
-
-**Acceptance:** Cases 1–4 install an LCM compaction and built-in remote call count is zero. Case 5 cancels and built-in remote call count remains zero. `session_compact.fromExtension` is true on successful cases.
-
-#### Task 11 — Prove repeated compaction, rebuild, and resume
-
-**Files:**
-
-- `packages/coding-agent/test/lcm-compaction-lifecycle.test.ts`
-
-**Change:** Exercise a persistent session through at least two compactions in each renderer. Rebuild context and resume the session from disk.
-
-**Acceptance:** Exact JSONL source can be read from every raw artifact; all raw sources remain transitively reachable from current roots; prior roots are condensed rather than dropped; active roots remain bounded; artifact IDs continue after resume; context-full rebuild exposes textual root references; snapcompact rebuild reattaches a summary-only archive; unique raw sentinels never appear in snapcompact archive source.
-
-### Wave 6: documentation and cleanup only after behavior works
-
-#### Task 12 — Document installation and constraints
-
-**Files:**
-
-- `packages/coding-agent/examples/extensions/README.md`
-- comments at the top of `lcm-compaction/index.ts`
-
-**Change:** Add concise installation and usage instructions, supported strategies, renderer flag, status command, retrieval examples, fail-closed remote behavior, session-scoped artifact IDs, and explicit non-support for handoff/shake/off. State that plugin LLM summarization may still call the active hosted model even though built-in remote compaction is bypassed.
-
-**Acceptance:** A user can copy the extension directory to `~/.omp/agent/extensions/` or `.omp/extensions/`, select context-full or snapcompact, trigger compaction, inspect status, and retrieve a cited artifact without reading source code.
+```text
+read artifact://17
+read artifact://17:1-300
+grep "validateToken" artifact://17
+```
 
 ---
 
-## Supervisor integration procedure
+## Abort discipline
 
-After each wave:
+Pass `event.signal` to every summary call. Check it:
 
-1. Read every changed module and its focused test. Check it against the fixed contracts; do not accept architectural substitutions.
-2. Run only the focused tests for that wave.
-3. Run coding-agent typechecking after Waves 1, 4, and 5.
-4. Resolve failures at their source. Do not weaken assertions, skip tests, or add timing sleeps.
-5. Do not run the full suite until all focused scenarios pass.
+- before source selection;
+- before each artifact write;
+- immediately after each artifact write;
+- before and after each LLM request;
+- before parent condensation;
+- before rendering;
+- before returning the custom result.
 
-Suggested focused commands from repository root:
+An abort returns cancel. It never triggers deterministic fallback or built-in compaction.
+
+---
+
+## Implementation waves and Luna Medium tasks
+
+The supervisor must create todos for every task below before implementation. Each task is intentionally narrow enough for Luna Medium.
+
+### Wave 1 — Standalone package foundation
+
+Run Tasks 1 and 2 concurrently.
+
+#### Task 1: Create package and marketplace metadata
+
+**Files:**
+
+- `package.json`
+- `.omp-plugin/marketplace.json`
+- `.gitignore`
+
+**Instructions:** Create the standalone package metadata described above. Use published compatible OMP package versions, all from the same release line. Declare `src/index.ts` as both export and OMP extension. Add renderer plugin setting. Ignore `node_modules`, build/coverage output, packed tarballs, local OMP/session state, and environment files.
+
+**Acceptance:** `bun install` succeeds; OMP plugin metadata identifies `nszceta/omp-lcm-inspired-compaction`; no local filesystem dependency exists.
+
+#### Task 2: Create TypeScript and Biome configuration
+
+**Files:**
+
+- `tsconfig.json`
+- `biome.json`
+- `LICENSE`
+
+**Instructions:** Use strict TypeScript suitable for Bun ESM and `.ts` imports. Use repository-local formatting/lint configuration. Add the repository’s intended license text; do not copy an incompatible license.
+
+**Acceptance:** An empty `src/index.ts` can typecheck once dependencies are installed; no path alias points into an OMP checkout.
+
+### Wave 2 — Independent pure modules
+
+Run Tasks 3, 4, and 5 concurrently after package setup.
+
+#### Task 3: Implement contracts, parsing, and formatting
+
+**Files:**
+
+- `src/contracts.ts`
+- `test/contracts.test.ts`
+
+**Instructions:** Implement constants, data interfaces, safe previous-state parsing, numeric artifact ID validation, root formatter, artifact URI formatter, and renderer value parser.
+
+**Acceptance:** Tests cover valid and invalid state, unknown versions, malformed roots, stable root order, numeric IDs, and deterministic reference lines.
+
+#### Task 4: Implement exact source capture and chunk planning
+
+**Files:**
+
+- `src/source.ts`
+- `test/source.test.ts`
+
+**Instructions:** Implement the exact source-selection algorithm and JSONL chunk planning. Inject token counting and artifact saving so tests use fakes. Do not perform model calls or DAG condensation.
+
+**Acceptance:** Tests cover first activation, repeated LCM generation, earlier non-LCM compaction, split-turn prefix, recent-entry exclusion, exact JSON round-trip, stable chunks, missing boundary, and abort.
+
+#### Task 5: Implement three-level summarization
+
+**Files:**
+
+- `src/summarize.ts`
+- `test/summarize.test.ts`
+
+**Instructions:** Implement normal, aggressive, and deterministic convergence with injected model call and token counter. Keep model prose separate from deterministic retrieval text.
+
+**Acceptance:** Tests prove normal success, aggressive escalation, deterministic fallback, output bound, non-shrinking rejection, empty/error handling, and abort propagation.
+
+### Wave 3 — DAG and renderers
+
+Run Tasks 6, 7, and 8 concurrently after Wave 2.
+
+#### Task 6: Implement immutable DAG construction
+
+**Files:**
+
+- `src/dag.ts`
+- `test/dag.test.ts`
+
+**Instructions:** Save leaf and parent node artifacts through injected storage. Combine prior and new roots, condense oldest roots to four, and keep preserve state bounded.
+
+**Acceptance:** Across at least ten simulated generations, every raw source is reachable, root order is stable, roots never exceed four, previous nodes are not mutated, write failures do not install invalid references, and serialized preserve state is bounded by active roots.
+
+#### Task 7: Implement context-full result renderer
+
+**Files:**
+
+- `src/render-context-full.ts`
+- `test/render-context-full.test.ts`
+
+**Instructions:** Produce the complete textual compaction result and plugin-only preserve data. Seed tests with fake previous snapcompact, OpenAI V1, and V2 preserve keys and prove none survive.
+
+**Acceptance:** Summary contains deterministic root links; boundary fields are preserved exactly; only the LCM preserve key remains.
+
+#### Task 8: Implement summary-only snapcompact renderer
+
+**Files:**
+
+- `src/render-snapcompact.ts`
+- `test/render-snapcompact.test.ts`
+
+**Instructions:** Call public snapcompact over one synthetic root message. Supply only plugin state as previous preserve data. Cap frames at four. Make model and compact function injectable.
+
+**Acceptance:** `archiveSourceText(getPreservedArchive(result.preserveData))` contains root summary markers and artifact links, excludes a unique raw-history sentinel and old archive sentinel, and a second pass does not unfold the first archive.
+
+### Wave 4 — Controller, configuration, and tool
+
+Run Tasks 9 and 10 concurrently after Wave 3.
+
+#### Task 9: Implement controller and extension entry point
+
+**Files:**
+
+- `src/controller.ts`
+- `src/config.ts`
+- `src/index.ts`
+
+**Instructions:** Assemble source capture, model summarization, DAG construction, renderer selection, settings, status command, and `session_before_compact`. Export a factory with dependency injection for tests; default export wires public OMP APIs. Implement fail-closed returns on every handled path.
+
+**Acceptance:** The extension registers without side effects; settings are read per session/cwd; context-full and snapcompact paths return complete results; no accepted path returns undefined.
+
+#### Task 10: Implement recursive expansion tool
+
+**Files:**
+
+- `src/tools.ts`
+- `test/tools.test.ts`
+
+**Instructions:** Implement the fixed `lcm_expand` contract using only the calling session’s artifact resolver. Keep output bounded and errors contained.
+
+**Acceptance:** Tests cover a leaf, condensed parent, depth bounds, optional raw inclusion, missing artifact, malformed node, and cycle defense.
+
+### Wave 5 — Standalone integration tests
+
+Run Tasks 11, 12, and 13 concurrently after the entry point exists. All tests remain in this repository.
+
+#### Task 11: Test controller failure and renderer selection
+
+**Files:**
+
+- `test/helpers.ts`
+- `test/controller.test.ts`
+
+**Instructions:** Build a small fake ExtensionAPI/context/event harness. Test `auto`, explicit context-full, explicit snapcompact, custom instructions, text-only model, missing model/key, abort, boundary failure, artifact failure, model failure with deterministic fallback, and status updates.
+
+**Acceptance:** Successful paths return complete custom compaction. Every accepted failure returns cancel. No test accepts undefined.
+
+#### Task 12: Prove built-in remote compaction interception
+
+**Files:**
+
+- `test/remote-interception.test.ts`
+
+**Instructions:** Test against the OMP dev dependency without modifying it. Prefer an AgentSession integration harness like OMP’s own compaction-hook tests. Configure remote-enabled context-full and inject a deterministic plugin summarizer. Supply a throwing/counting remote endpoint or provider-native request seam. Cover manual configured remote, explicit one-off remote mode if public test APIs allow it, and automatic remote-enabled context-full.
+
+Also cover summary failure reaching deterministic fallback and artifact/abort cancellation.
+
+**Acceptance:** Successful cases install `fromExtension` LCM results and the built-in remote request counter remains zero. Cancelled cases also leave the built-in remote counter at zero. If a provider-native seam cannot be injected through public APIs, retain the strongest executable endpoint test and add a direct control-flow assertion proving the complete hook result is returned; do not modify OMP to create a seam and do not falsely claim an unexecuted provider-native test.
+
+#### Task 13: Test persistence, repeated compaction, and resume
+
+**Files:**
+
+- `test/lifecycle.test.ts`
+
+**Instructions:** Use a temporary persistent session and public OMP APIs. Run at least two generations for each renderer, rebuild context, and reopen the session.
+
+**Acceptance:** Exact raw JSONL is readable; all raw sources are transitively reachable; roots remain bounded; artifact IDs continue after resume; context-full exposes textual root references; snapcompact exposes a valid reattached summary-only archive; unique raw sentinels never appear in snapcompact source.
+
+### Wave 6 — Documentation and packaging cleanup
+
+Do this only after runtime behavior and focused tests pass.
+
+#### Task 14: Write standalone user documentation
+
+**Files:**
+
+- `README.md`
+- top-level comments in `src/index.ts`
+
+**Instructions:** Document installation from the repository/package, OMP plugin enablement, supported OMP versions, renderer setting, `/lcm` commands, context-full and snapcompact examples, remote interception semantics, artifact retrieval, session-scoped IDs, hosted summarizer calls, fail-closed behavior, and limitations for handoff/shake/off and unavailable async transactions.
+
+Do not tell users to copy files into OMP source or patch OMP.
+
+**Acceptance:** A user can install and activate the plugin, select a renderer, trigger compaction, inspect status, expand a node, and read exact source without opening implementation code.
+
+#### Task 15: Verify package contents
+
+**Files:**
+
+- package metadata only if correction is required
+
+**Instructions:** Run `bun pm pack`, inspect the tarball file list, then remove the generated tarball after verification unless the repository convention explicitly tracks release tarballs.
+
+**Acceptance:** Package contains `src`, `README.md`, `LICENSE`, and correct metadata. It excludes tests, PLAN.md unless intentionally packaged, local sessions, credentials, node_modules, coverage, and OMP source.
+
+---
+
+## Supervisor validation procedure
+
+### After each wave
+
+1. Read each changed local module and focused test.
+2. Check it against the fixed contracts before running it.
+3. Run only that wave’s focused tests.
+4. Resolve failures at the source.
+5. Run `bun run typecheck` after Waves 2, 4, and 5.
+6. Do not run full validation until all focused tests pass.
+
+Suggested commands from this repository root:
 
 ```bash
-bun test packages/coding-agent/test/lcm-compaction-types.test.ts
-bun test packages/coding-agent/test/lcm-compaction-source.test.ts
-bun test packages/coding-agent/test/lcm-compaction-summarizer.test.ts
-bun test packages/coding-agent/test/lcm-compaction-dag.test.ts
-bun test packages/coding-agent/test/lcm-compaction-context-full.test.ts
-bun test packages/coding-agent/test/lcm-compaction-snapcompact.test.ts
-bun test packages/coding-agent/test/lcm-compaction-extension.test.ts
-bun test packages/coding-agent/test/lcm-compaction-tools.test.ts
-bun test packages/coding-agent/test/lcm-compaction-remote-interception.test.ts
-bun test packages/coding-agent/test/lcm-compaction-lifecycle.test.ts
-bun --cwd packages/coding-agent run check:types
+bun install
+bun test test/contracts.test.ts
+bun test test/source.test.ts
+bun test test/summarize.test.ts
+bun test test/dag.test.ts
+bun test test/render-context-full.test.ts
+bun test test/render-snapcompact.test.ts
+bun test test/controller.test.ts
+bun test test/tools.test.ts
+bun test test/remote-interception.test.ts
+bun test test/lifecycle.test.ts
+bun run typecheck
 ```
 
-If the repository’s Bun test wrapper requires a different invocation, use the nearest existing coding-agent test command without changing test semantics.
+The exact test runner options may be adjusted for the installed Bun version, but test semantics may not be weakened.
 
 ---
 
-## Luna Medium verification assignments
+## Luna Medium verifier assignments
 
-Use fresh read-only verifier agents after all implementation tasks and focused tests pass. Run these verifiers concurrently. Each assignment is intentionally narrow.
+After implementation and focused tests pass, run these fresh read-only verifiers concurrently.
 
-### Verifier A — Source losslessness and provenance
+### Verifier A: standalone boundary
 
-Inspect `source.ts`, `dag.ts`, and their tests. Starting from every active root in the lifecycle fixture, traverse node children and raw sources. Confirm every entry before each `firstKeptEntryId` is present byte-for-byte after JSON parsing and remains reachable after the second compaction. Report missing entry IDs or unreachable artifacts exactly.
+Inspect repository paths, imports, package metadata, and packed file list. Confirm all implementation and tests live in this repository, no file was added to an OMP checkout, no local relative OMP import exists, and installation uses package dependencies.
 
-### Verifier B — Context-full and remote short circuit
+### Verifier B: exact retention and reachability
 
-Inspect the manual and automatic `fromHook` branches plus the extension handler and remote-interception test. Confirm every successful handled event returns a complete result before core `compact()` and every handled failure cancels. Confirm there is no `return undefined` path after acceptance. Confirm remote endpoint, OpenAI V1, and OpenAI V2 built-in paths cannot execute in the tested cases.
+Inspect `src/source.ts`, `src/dag.ts`, and lifecycle fixtures. Starting at current roots, traverse every node and raw source. Confirm every entry discarded before each keep boundary exists exactly in raw JSONL and remains reachable after repeated compaction. Report exact missing entry IDs or broken artifact IDs.
 
-### Verifier C — Snapcompact archive purity
+### Verifier C: context-full and remote fail-closed path
 
-Inspect `render-snapcompact.ts` and lifecycle tests. Confirm synthetic input contains only LCM root summaries/references, previous snapcompact archive data is not supplied, old provider-native history is not preserved, and second compaction cannot unfold old raw archive source. Confirm OMP context rebuild receives a valid snapcompact archive.
+Inspect `src/controller.ts`, `src/render-context-full.ts`, and remote tests. Confirm every accepted success returns a complete result and every accepted failure returns cancel. Confirm no undefined fallthrough exists. Confirm old remote preserve payloads are not merged. Report the actual executable evidence that built-in remote request count stayed zero.
 
-### Verifier D — Guaranteed convergence and bounds
+### Verifier D: snapcompact source purity
 
-Inspect `summarizer.ts`, `dag.ts`, and tests. Confirm non-shrinking normal output escalates, non-shrinking aggressive output reaches deterministic fallback, fallback is bounded, active roots never exceed four, and preserve state size is bounded by active roots rather than historical node count.
+Inspect `src/render-snapcompact.ts` and tests. Confirm the synthetic message contains only formatted LCM roots, previous snapcompact/provider-native preserve data is not passed, current LCM state survives, a second pass does not unfold the first archive, and context rebuild recognizes the result archive.
 
-### Verifier E — Abort and failure safety
+### Verifier E: convergence and bounded growth
 
-Inspect all awaited calls in the handler. Confirm signal checks surround LLM calls and artifact writes. Confirm abort, missing model/key, boundary failure, and artifact failure cannot fall through to built-in compaction. Confirm partial artifact writes may be orphaned but are never referenced by an installed state.
+Inspect `src/summarize.ts`, `src/dag.ts`, and tests. Confirm non-shrinking normal output escalates, non-shrinking aggressive output reaches deterministic fallback, fallback is bounded, roots never exceed four, and preserve data grows with current roots rather than total history.
 
-### Verifier F — User-facing retrieval
+### Verifier F: abort and partial-write safety
 
-Load the extension in a temporary persistent session, trigger one small context-full compaction with an injected deterministic summarizer, read the root node through `lcm_expand`, then read and grep its raw source artifact. Report the actual IDs and observed source sentinel. Repeat the context reconstruction check for snapcompact.
+Trace every awaited artifact write and model request. Confirm abort checks surround them, a failed write is never referenced by an installed node, partial artifacts may be orphaned but partial state is never installed, and abort cannot fall through to built-in compaction.
 
-The supervisor must address every concrete verifier defect, rerun the affected focused test, and rerun that verifier’s scenario.
+### Verifier G: user retrieval smoke test
+
+Install the plugin from this repository into a temporary OMP environment. Trigger deterministic context-full compaction, use `lcm_expand`, then `read` and `grep` the raw artifact. Repeat snapcompact archive reconstruction with a vision-capable test model or deterministic snapcompact fixture. Record actual artifact IDs and source sentinels.
+
+The supervisor must fix every concrete verifier defect, rerun its focused test, and rerun that verifier scenario.
 
 ---
 
 ## Final validation
 
-After all verifier defects are resolved:
-
-1. Run all new LCM tests together.
-2. Run existing focused regression tests for compaction hooks, manual snapcompact fallback, automatic snapcompact fallback/budget, artifact concurrency/resume, and internal artifact URLs.
-3. Run coding-agent typechecking and Biome check once.
-4. Smoke test the extension as a user in a temporary persistent session for both renderers.
-
-Required regression commands should include the closest current equivalents of:
+Run from this standalone repository:
 
 ```bash
-bun test \
-  packages/coding-agent/test/lcm-compaction-*.test.ts \
-  packages/coding-agent/test/agent-session-manual-snapcompact-fallback.test.ts \
-  packages/coding-agent/test/agent-session-snapcompact-auto-fallback.test.ts \
-  packages/coding-agent/test/agent-session-snapcompact-budget.test.ts \
-  packages/coding-agent/test/artifacts-concurrency.test.ts \
-  packages/coding-agent/test/internal-urls/artifact-path-only.test.ts
-bun --cwd packages/coding-agent run check
+bun test
+bun run typecheck
+bun run check
+bun pm pack
 ```
 
-Do not claim remote interception based only on code inspection. The throwing/counted remote stub must remain at zero in manual and automatic tests.
+Then perform two user-path smoke tests using the installed plugin:
+
+### Context-full smoke
+
+1. Enable the plugin.
+2. Set renderer to context-full.
+3. Use remote-enabled OMP context-full settings.
+4. Trigger compaction.
+5. Observe `/lcm status` reporting remote interception.
+6. Expand the root node.
+7. Read and grep an exact raw source artifact.
+8. Confirm no built-in remote compaction request was observed by the test seam/log.
+
+### Snapcompact smoke
+
+1. Use a vision-capable model or controlled test fixture.
+2. Set renderer to snapcompact.
+3. Trigger two compactions with unique raw sentinels.
+4. Rebuild/resume context.
+5. Confirm snapcompact archive source contains root summaries and artifact links.
+6. Confirm it does not contain either raw sentinel.
+7. Expand current roots to recover both raw sentinels transitively.
+
+Inspect the packed tarball. Remove temporary sessions, artifacts, credentials, coverage, and tarballs before finalizing unless explicitly intended as release assets.
 
 ---
 
-## End-to-end acceptance checklist
+## Completion checklist
 
-The implementation is done only when all boxes are true:
-
-- [ ] Extension loads from the documented extension directory.
-- [ ] Hook metadata exposes effective manual/automatic action and remote-enabled state.
-- [ ] First activation archives exact earlier branch history, including history covered by a previous non-LCM summary.
-- [ ] Repeated compaction archives only newly discarded history and preserves prior roots through the DAG.
-- [ ] Every model-visible summary receives artifact references through deterministic code after model output.
+- [ ] Repository is a standalone OMP plugin package.
+- [ ] All implementation files are under this repository’s `src/`.
+- [ ] All tests are under this repository’s `test/`.
+- [ ] No OMP source checkout was modified.
+- [ ] No local relative OMP source dependency exists.
+- [ ] `package.json` exports `src/index.ts` and declares `omp.extensions`.
+- [ ] Marketplace metadata points to `nszceta/omp-lcm-inspired-compaction`.
+- [ ] Plugin settings support `auto`, `context-full`, and `snapcompact` renderers.
+- [ ] First activation archives exact history covered by earlier non-LCM compactions.
+- [ ] Repeated compaction captures only newly discarded source after the latest LCM generation.
+- [ ] Recent entries at and after `firstKeptEntryId` are not archived prematurely.
+- [ ] Exact source is stored as JSONL artifacts.
+- [ ] Every active summary reference is appended by deterministic code.
 - [ ] Every raw source remains transitively reachable from a current root.
-- [ ] Active roots and preserve data remain bounded over repeated generations.
-- [ ] Normal, aggressive, and deterministic summarization levels guarantee convergence.
-- [ ] Context-full returns a portable textual root summary and strips old snapcompact/remote payloads.
-- [ ] Snapcompact archives only synthetic root summaries/references and never unfolds a prior raw archive.
-- [ ] Snapcompact archive is reattached after context rebuild.
-- [ ] Built-in remote endpoint compaction is not called while LCM handles context-full.
-- [ ] Built-in OpenAI V1 provider-native compaction is not called while LCM handles context-full.
-- [ ] Built-in OpenAI V2 streaming compaction is not called while LCM handles context-full.
-- [ ] LLM summary failure reaches deterministic fallback without remote-compaction fallthrough.
-- [ ] Abort and artifact failure cancel without remote-compaction fallthrough.
+- [ ] Active roots never exceed four.
+- [ ] Preserve data contains bounded roots, not the full DAG.
+- [ ] Normal, aggressive, and deterministic levels guarantee convergence.
+- [ ] Context-full result strips old snapcompact and remote preserve payloads.
+- [ ] Snapcompact receives only synthetic LCM root messages.
+- [ ] Snapcompact never unfolds a previous raw archive.
+- [ ] Snapcompact archive survives context rebuild.
+- [ ] Complete hook results bypass built-in remote endpoint compaction.
+- [ ] Complete hook results bypass provider-native remote compaction by control flow.
+- [ ] Model-summary failure uses deterministic fallback without built-in compaction fallthrough.
+- [ ] Abort, boundary failure, and artifact failure cancel without fallthrough.
 - [ ] Artifact IDs continue safely after session resume.
-- [ ] `lcm_expand`, ordinary `read artifact://ID`, selectors, and grep recover source material.
-- [ ] Existing context-full, snapcompact, artifact, and compaction-hook regression tests still pass.
-- [ ] Documentation accurately states supported strategies and plugin-level limitations.
+- [ ] `lcm_expand`, `read artifact://ID`, selectors, and grep recover retained history.
+- [ ] `bun test`, `bun run typecheck`, and `bun run check` pass.
+- [ ] Packed package contains only intended standalone plugin files.
+- [ ] README never instructs users to modify OMP source.
 
 ---
 
-## Decisions that must not be reopened by subagents
+## Decisions subagents must not reopen
 
-- This is an extension over existing `context-full` and `snapcompact`, not a newly registered strategy.
-- Returning a complete `session_before_compact` result is the remote interception mechanism; do not patch HTTP clients.
-- The plugin is fail-closed once it accepts an event.
-- Artifacts are the immutable source store; `preserveData` contains only bounded active roots.
+- The implementation lives entirely in this repository.
+- OMP is a package dependency and read-only reference, not an implementation target.
+- No core hook metadata change is allowed.
+- No new OMP strategy is added.
+- Existing `session_before_compact` custom results are the interception mechanism.
+- The plugin fails closed after accepting an event.
+- Context-full and snapcompact are the supported renderers.
+- `auto` renderer uses preparation settings, model image capability, and public custom instructions.
+- Artifacts are the immutable source store.
+- Preserve data contains only bounded roots.
 - Artifact IDs are numeric and session-scoped.
-- References are appended programmatically, never generated by the LLM.
-- Snapcompact receives synthetic summary messages and no previous snapcompact/provider-native archive.
-- The active root limit is four and snapcompact frame limit is four for this version.
-- The extension uses the current model; it does not silently select a cheaper or different provider.
-- Handoff, shake, off, asynchronous soft-limit swaps, and transactional artifact/session commits are non-goals for this implementation.
+- IDs are appended after model output.
+- Snapcompact receives synthetic roots and no previous snapcompact/provider-native archive.
+- The active root maximum and snapcompact frame maximum are both four.
+- The active model performs summaries; the plugin does not silently switch providers.
+- Handoff, shake, off, async atomic swaps, and multi-write transactions are outside this standalone version.
