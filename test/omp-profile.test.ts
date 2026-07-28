@@ -110,8 +110,27 @@ describe("custom OMP test profile", () => {
     expect(renderers?.map((item) => item.value)).toEqual([
       "renderer context-full ",
     ]);
-    const status = await command.handler("status", context);
-    expect(status).toBe("{}");
-    expect(notifications).toEqual(["{}"]);
+    controller.status.lastOutcome = "success";
+    controller.status.lastRoots = [
+      {
+        artifactId: "41",
+        level: 0,
+        sourceEntryCount: 1,
+        tokenCount: 6,
+      },
+    ];
+    const runtimeContext = {
+      ...context,
+      sessionManager: { getArtifactPath: () => artifactPath },
+    };
+    const status = await command.handler("status", runtimeContext);
+    expect(status).toContain('"lastOutcome": "success"');
+    expect(status).not.toContain("LCM DAG");
+    const dump = await command.handler("dump", runtimeContext);
+    expect(dump).toContain("LCM diagnostics:");
+    expect(dump).toContain("LCM DAG (bounded to depth 8):");
+    expect(dump).toContain("Node artifact://41 [leaf-summary, level 0]");
+    expect(dump).toContain("Summary: runtime expansion succeeded");
+    expect(notifications).toEqual([status, dump]);
   });
 });

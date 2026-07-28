@@ -5,7 +5,10 @@ import {
   createController,
   type LcmController,
 } from "./controller.ts";
-import { registerLcmExpandTool } from "./tools.ts";
+import {
+  createLcmExpandHandler,
+  registerLcmExpandTool,
+} from "./tools.ts";
 export interface LcmExtensionOptions {
   deps?: ControllerDeps;
   context?: any;
@@ -25,7 +28,7 @@ export const createExtension = createLcmExtension;
 const LCM_HELP = [
   "LCM commands:",
   "  /lcm status                 Show renderer, generation, roots, and outcome.",
-  "  /lcm dump                   Show bounded compaction diagnostics.",
+  "  /lcm dump                   Show diagnostics and the artifact-backed DAG.",
   "  /lcm renderer auto          Select automatically.",
   "  /lcm renderer context-full  Use text roots.",
   "  /lcm renderer snapcompact   Use summary-only snapcompact (vision model required).",
@@ -83,8 +86,36 @@ export function registerExtension(
     let output: string;
     if (words[0] === "help" || words.length === 0) {
       output = LCM_HELP;
-    } else if (words[0] === "status" || words[0] === "dump") {
+    } else if (words[0] === "status") {
       output = JSON.stringify(ensure(runtimeContext).status, null, 2);
+    } else if (words[0] === "dump") {
+      const status = ensure(runtimeContext).status;
+      const roots = status.lastRoots ?? [];
+      const expand = createLcmExpandHandler();
+      const dag =
+        roots.length === 0
+          ? "(no roots recorded)"
+          : (
+              await Promise.all(
+                roots.map((root) =>
+                  expand(
+                    {
+                      artifactId: root.artifactId,
+                      depth: 8,
+                      includeRaw: false,
+                    },
+                    runtimeContext,
+                  ),
+                ),
+              )
+            ).join("\n\n");
+      output = [
+        "LCM diagnostics:",
+        JSON.stringify(status, null, 2),
+        "",
+        "LCM DAG (bounded to depth 8):",
+        dag,
+      ].join("\n");
     } else if (words[0] === "renderer" && words[1]) {
       const renderer = words[1] as Renderer;
       if (!["auto", "context-full", "snapcompact"].includes(renderer)) {
