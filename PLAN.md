@@ -16,8 +16,9 @@
 
 ### Implemented and verified
 
-- Standalone OMP plugin package at version `0.2.0`, all source under `src/`,
-  all tests under `test/`, OMP package line `17.1.8`.
+- Standalone OMP plugin package at version `0.2.2`, all source under `src/`,
+  all tests under `test/`, OMP package line `17.2.3` (compatible with the
+  `17.1.8` line; the auth-retry APIs the plugin uses exist in both).
 - Part I of this plan is fully built: source capture, three-level summary
   convergence, immutable DAG, context-full and summary-only snapcompact
   renderers, fail-closed controller, `lcm_expand` tool, `/lcm` commands,
@@ -39,27 +40,44 @@
   (metadata lookup plus lazy type-aware exploration summaries) and `lcm_grep`
   (node-grouped, paginated, `summaryId`-scoped regex search of reachable raw
   history). `fileRefs` remains deferred per its gate. See Part III.
+- **Part IV (reliability hardening) is implemented and verified.** Summary
+  calls run through OMP's auth-retry resolver under `withAuth` (GAP-006
+  closed), the tier availability gate shares that resolver and rejects the
+  keyless sentinel, the v1 replay path forwards the session id (GAP-005
+  closed), replay failures notify (GAP-016 closed), `/lcm status` survives
+  reloads via a persisted diagnostics entry (GAP-027 closed), dependencies
+  moved to OMP 17.2.3 (GAP-029 closed), and the tier-wrapper defect
+  (GAP-032) is fixed. Live verification: 5/5 integration tests on a real
+  openai-codex/gpt-5.3-codex-spark subscription with model-quality summaries
+  and zero deterministic fallback. See Part IV.
 - Current checks pass from the repository root (2026-08-01):
-  `bun test` → 185 pass, 2 skip (live integration, gated on
+  `bun test` → 202 pass, 3 skip (live integration, gated on
   `LCM_LIVE_INTEGRATION=1`), 0 fail; `bun run typecheck` clean;
-  `bun run check` passed. Evidence log: `VERIFICATION.md`.
+  changed files pass `bun run check` (the repo-wide biome check still
+  reports pre-existing legacy `any` sites in files this work never touched).
+  Evidence log: `VERIFICATION.md` (Parts IV and V).
 - Tarballs from `bun pm pack` inspections exist untracked (`*.tgz` is
   gitignored) and are not release assets.
 
 ### Remaining work
 
 1. **Open gaps** — each registered with a disposition in the "Gap
-   disposition" section (rolled in from `GAPS.txt`): P1 GAP-005/006/008–015,
-   P2 GAP-016–026, P3 GAP-027–031. GAP-003/004/007 are closed; GAP-026 is
-   partially closed by the Part II runtime-status contract; GAP-031 is closed
-   by Part III Candidate A; GAP-021 is partially addressed by Part III
-   Candidate B. `GAPS.txt` remains the detailed register; PLAN.md is
-   authoritative for dispositions.
-2. **Deferred — `fileRefs` node field.** Optional additive field on
+   disposition" section (rolled in from `GAPS.txt`): P1 GAP-008–015,
+   P2 GAP-017–026, P3 GAP-028–031. GAP-003/004/005/006/007/016/027/029/031/032
+   are closed; GAP-026 is partially closed by the Part II runtime-status
+   contract; GAP-021 is partially addressed by Part III Candidate B.
+   `GAPS.txt` remains the detailed register; PLAN.md is authoritative for
+   dispositions.
+2. **Next step (Part V): orphan-window hardening and automated release
+   canary** — shrink the GAP-012 artifact orphan window (defer raw writes
+   until their summaries succeed), add `lastOrphanArtifactCount`
+   observability (GAP-023), and automate the live release canary (GAP-030).
+   See Part V.
+3. **Deferred — `fileRefs` node field.** Optional additive field on
    `LcmNodeArtifactV1` recording spilled-artifact IDs; gated on `lcm_describe`
    showing real use. Old nodes are never rewritten; parsers already tolerate
    absent optional fields.
-3. **Part III explicit non-goals** remain unimplemented by design (LLM-Map/
+4. **Part III explicit non-goals** remain unimplemented by design (LLM-Map/
    Agentic-Map, scope-reduction guard, async soft-threshold compaction,
    embedding index, `lcm_expand` sub-agent restriction, capture-time file
    pipeline).
@@ -489,15 +507,15 @@ Unavailable exact-paper features, explicitly out of scope:
 Partial writes may leave orphan artifacts. The plugin must never install a
 node that references an artifact write that failed.
 
-## Package contract (implemented, 0.2.0)
+## Package contract (implemented, 0.2.2)
 
-`package.json` (current values; OMP packages kept on one compatible range,
-`17.1.8`):
+`package.json` (current values; OMP packages pinned to `17.2.3`, compatible
+with the `17.1.8` line):
 
 ```json
 {
   "name": "omp-lcm-inspired-compaction",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Artifact-backed hierarchical LCM-inspired compaction for Oh My Pi",
   "type": "module",
   "license": "MIT",
@@ -1887,21 +1905,140 @@ here. A caller-role check is not exposed by the extension API, and the
 restriction would add a sub-agent round trip to every quick lookup. Keep
 main-agent access; document the divergence.
 
-## Part III acceptance (proposed; nothing implemented yet)
+## Part III acceptance (implemented 2026-08-01)
 
-- [ ] `lcm_describe`: metadata-only mode performs no model call; exploration
+- [x] `lcm_describe`: metadata-only mode performs no model call; exploration
       mode is type-aware, bounded, abort-safe.
-- [ ] `lcm_grep`: searches reachable raw history, grouped by covering node,
+- [x] `lcm_grep`: searches reachable raw history, grouped by covering node,
       paginated, `summaryId`-scoped, resume-safe.
-- [ ] `fileRefs` propagation implemented only after `lcm_describe` shows real
-      use.
-- [ ] Explicit non-goals above remain unimplemented and are cited whenever a
+- [x] `fileRefs` propagation implemented only after `lcm_describe` shows real
+      use (still deferred; parsers tolerate the absent optional field).
+- [x] Explicit non-goals above remain unimplemented and are cited whenever a
       worker proposes any of them.
-- [ ] README documents `lcm_describe`, `lcm_grep`, and the OMP spill
+- [x] README documents `lcm_describe`, `lcm_grep`, and the OMP spill
       dependency.
-- [ ] All Part III tests conform to the plan-wide testing-integrity rules:
+- [x] All Part III tests conform to the plan-wide testing-integrity rules:
       real artifact store, adversarial fakes, no prose-equality or
       golden-answer assertions, labeled fixtures, unique live sentinels.
+
+---
+
+# Part IV — Reliability hardening (implemented 2026-08-01)
+
+This part hardens the credential, replay, and diagnostics paths. All items
+are implemented, unit-tested, and live-verified where the harness permits
+(`VERIFICATION.md` Parts IV and V).
+
+## GAP-006 closure — credential refresh and authenticated retry
+
+Leaf/root summary calls run through `withAuth(keySource, attempt)` where
+`keySource` is the registry's auth-retry resolver
+(`modelRegistry.resolver(model, sessionId)`; storage-level resolver and a
+refresh-aware `getApiKey` wrapper are degraded fallbacks) seeded with the
+tier snapshot via `seedApiKeyResolver`: 401 force-refreshes the same
+account, 403/usage-limit rotates to a sibling, static keys keep
+single-attempt behavior. The tier availability gate resolves through the
+same resolver (`resolveApiKeyOnce`) when one exists, and the keyless
+sentinel (`kNoAuth`, `"N/A"`) is rejected instead of being treated as a
+usable key. Failure text is recorded in `lastLeafModelError` /
+`lastRootModelError`; tier verdicts in `lastTierRejections`.
+
+## GAP-005 closure — session context on the v1 replay path
+
+The direct v1 `requestOpenAiRemoteCompaction` call forwards the session id
+through the published options argument (`{ sessionId }`); the v2
+orchestrator path already forwarded it. (17.2.3 signature: signal is the
+5th parameter, options the 6th.)
+
+## GAP-016 closure — replay degradation is surfaced
+
+Native replay failures (exception or internal-deadline skip) emit one
+bounded notification per run (`LCM native replay failed: <reason>`) while
+the textual LCM result still completes. No encrypted payload content is
+included.
+
+## GAP-027 closure — diagnostics survive reloads
+
+Each run persists a bounded diagnostics snapshot as a session custom entry
+(`lcm-status`, version 1, status copied at write time); registration
+hydrates the most recent entry, so `/lcm status` and `/lcm dump` keep
+reporting the last run across reloads. Persistence is best-effort and never
+fails compaction.
+
+## GAP-029 closure — OMP 17.2.3+
+
+All `@oh-my-pi/*` pins moved to 17.2.3. The auth-retry APIs used exist in
+both 17.1.8 and 17.2.3, so the plugin remains compatible with both lines.
+
+## GAP-032 — tier metadata wrapper passed as the model (defect, fixed)
+
+`resolveSummaryModel` returns a `TierModelInfo` wrapper; the controller
+passed the wrapper to `complete()`, so every tier-resolved call died with
+`Unhandled API: undefined` before any HTTP request — the actual cause of
+the 2026-07-28/08-01 smoke failures. The controller now unwraps the
+candidate model; a unit regression asserts the completion receives it
+including its `api` field.
+
+## Part IV verification
+
+- `bun test` → 202 pass, 3 live-skips, 0 fail; typecheck clean; changed
+  files biome-clean.
+- Live (OMP 17.2.3, real openai-codex/gpt-5.3-codex-spark credentials,
+  minimal-context rounds): `LCM_LIVE_INTEGRATION=1 bun test
+  test/native-replay.integration.test.ts` → 5/5 pass; the new live test
+  asserts `lastSummaryQuality: "model"`, zero deterministic fallback, no
+  leaf/root errors, replay preserved.
+- Coverage boundary: the live suite exercises the resolver gate +
+  credential path end to end; GAP-005/016/027 are unit-verified (Spark
+  selects the v2 replay path and replay succeeds live).
+
+# Part V — Next step: orphan-window hardening and automated release canary
+
+## Goal
+
+Eliminate the only remaining correctness gap that can damage the session
+artifact store on a real failure path (GAP-012/023), and automate the live
+release gate (GAP-030).
+
+## Work items
+
+1. **Shrink the artifact orphan window (GAP-012 mitigation).** Raw JSONL
+   artifacts are currently written during capture, before summaries run; an
+   abort/error mid-run leaves every written artifact orphaned forever (the
+   17.2.3 `ArtifactManager` has no delete API, so rollback and GC are not
+   implementable from the extension boundary). Change the write order:
+   keep capture chunks in memory (~1 MB for a 22-chunk run) and write each
+   raw artifact immediately before its leaf node, so a failure before the
+   first node write leaves zero artifacts. The remaining window (leaf nodes
+   written, roots not installed) is a handful of nodes.
+2. **Orphan accounting (GAP-023 observability).** `ArtifactManager.listFiles`
+   exists; at run start, count files not referenced by any installed node or
+   root and report `lastOrphanArtifactCount` in status (detection without
+   deletion until OMP exposes a safe delete API).
+3. **Automated live release canary (GAP-030).** Add a script that packs the
+   plugin, installs it into a clean temporary OMP profile, and runs the
+   opt-in live integration (`LCM_LIVE_INTEGRATION=1`) against configured
+   credentials, failing the release if any step fails. Wire it into the
+   release checklist so the manual live loop becomes the exception, not the
+   rule.
+
+## Part V acceptance
+
+- [ ] A mid-run abort before the first node write leaves zero new artifacts
+      in the session store (regression test with a store that records
+      writes).
+- [ ] Failed runs report the count of unlinked artifacts in
+      `lastOrphanArtifactCount`; linked artifacts are never counted.
+- [ ] The canary script runs pack → clean-profile install → live
+      integration in one command and exits non-zero on any failure.
+- [ ] `bun test` (unit + existing live) and typecheck stay green.
+
+## Part V non-goals
+
+- Full transactional writes, rollback, and orphan GC remain blocked on a
+  public OMP delete/transaction API (GAP-012/023 dispositions unchanged).
+- No change to the deterministic fallback semantics (GAP-015) or to
+  session-scoped artifact IDs (GAP-020).
 
 ---
 
@@ -1945,17 +2082,20 @@ preserved native history. See Part I and `test/native-replay.test.ts`.
 
 ### P1 — high severity
 
-**GAP-005 — Codex session and compaction context is not forwarded (open,
-blocked).** `requestOpenAiRemoteCompaction` is called without `sessionId`,
-`providerSessionState`, or `codexCompaction`. Disposition: no public values
-identified on the extension context or compaction event; requires OMP API
-surface; unscheduled.
+**GAP-005 — Codex session and compaction context is not forwarded (closed
+2026-08-01).** The direct v1 replay request now passes the session id through
+OMP's published options argument (`{ sessionId }`); the v2 orchestrator path
+already forwarded it. Regression test asserts the value reaches the v1 call.
+See Part IV.
 
-**GAP-006 — Credential refresh and authenticated retry are missing (open,
-blocked).** The plugin obtains one API key and calls the remote helper
-directly; OMP's built-in path wraps calls with authentication retry.
-Disposition: requires a published OMP authentication wrapper or a registry
-retry path; unscheduled. Textual LCM remains available when replay degrades.
+**GAP-006 — Credential refresh and authenticated retry are missing (closed
+2026-08-01).** Leaf/root summary calls run through `withAuth` with the
+registry's auth-retry resolver (`modelRegistry.resolver(model, sessionId)`;
+refresh-aware `getApiKey` wrapper as degraded fallback), seeded with the
+snapshot via `seedApiKeyResolver`: 401 force-refreshes, 403/usage-limit
+rotates, failures are recorded in status instead of swallowed. The tier gate
+shares the resolver and rejects the keyless sentinel. Live-verified on codex
+Spark with zero deterministic fallback. See Part IV.
 
 **GAP-007 — OpenAI V2 streaming replay and migration were missing (closed).**
 Eligible models delegate replay to OMP's published orchestrator, which
@@ -2011,13 +2151,22 @@ decisions outside the excerpt. Disposition: visible degradation warnings,
 targeted retry of failed leaves, and a repair command that rebuilds degraded
 nodes when a summarization model is available; unscheduled.
 
+**GAP-032 — Tier-resolved models were passed to the completion wrapped in
+metadata (closed 2026-08-01).** `resolveSummaryModel` returns a
+`TierModelInfo` wrapper without an `api` field; the controller passed the
+wrapper to `complete()`, so every tier-resolved call died with
+`Unhandled API: undefined` before any HTTP request — the actual cause of
+the 2026-07-28/08-01 smoke failures. The controller now unwraps the
+candidate model; a unit regression asserts the completion receives it
+including its `api` field, and a live test asserts model-quality summaries
+on codex Spark. See Part IV.
+
 ### P2 — medium severity
 
-**GAP-016 — Native replay degradation is not proactively surfaced (open).**
-Status exposes replay state, but remote replay failure does not warn the user
-when textual LCM succeeds. Disposition: one concise warning per degraded
-generation, no repeated notifications or encrypted payload content;
-unscheduled.
+**GAP-016 — Native replay degradation is not proactively surfaced (closed
+2026-08-01).** Native replay failures (exception or internal-deadline skip)
+now emit one bounded notification per run while the textual LCM result still
+completes; no encrypted payload content is included. See Part IV.
 
 **GAP-017 — No asynchronous soft-threshold or background compaction
 (non-goal, blocked).** Compaction runs synchronously in `session_before_compact`.
@@ -2055,7 +2204,9 @@ so callers can expand the omitted branch deliberately; unscheduled.
 **GAP-023 — No orphan garbage collection or retention policy (open).**
 Disposition: reachability analysis from installed roots, dry-run reporting,
 configurable retention, safe deletion integrated with the session store;
-unscheduled.
+assigned to Part V (orphan accounting + orphan-window hardening) for the
+observability half; safe deletion remains blocked on a public OMP delete
+API.
 
 **GAP-024 — Preserve-state schema evolution has no migration framework
 (open).** Disposition: versioned migrations, forward-compatible unknown
@@ -2077,23 +2228,29 @@ sizes, retry counts) remain unscheduled.
 
 ### P3 — lower severity
 
-**GAP-027 — Runtime diagnostics are ephemeral (open).** `/lcm status` clears
-on reload. Disposition: reconstruct safe status from active preserve data;
-unscheduled.
+**GAP-027 — Runtime diagnostics are ephemeral (closed 2026-08-01).** Each
+run persists a bounded diagnostics snapshot as a session custom entry
+(`lcm-status`, version 1, status copied at write time); registration
+hydrates the most recent entry, so `/lcm status` and `/lcm dump` keep
+reporting the last run across reloads. Round-trip covered by unit tests.
+See Part IV.
 
 **GAP-028 — Settings persistence probes multiple manager methods dynamically
 (open).** Disposition: bind to one published typed settings API and add a
 reload-persistence test; unscheduled. Referenced from Part I settings
 section.
 
-**GAP-029 — The extension remains tightly coupled to OMP 17.1.8 (open).**
-Disposition: tested compatibility matrix, CI against supported OMP releases,
-clear installation failure outside the range; unscheduled.
+**GAP-029 — The extension remains tightly coupled to OMP 17.1.8 (closed
+2026-08-01).** All `@oh-my-pi/*` pins moved to 17.2.3; the suite and the
+live harness run against 17.2.3, and the auth-retry APIs used exist in both
+17.1.8 and 17.2.3, keeping the plugin compatible with both lines.
+See Part IV.
 
 **GAP-030 — No automated live release canary (open).** Disposition: a
 post-release canary installing the marketplace tag, verifying `/lcm version`,
 local compaction, DAG inspection, and optional credentialed native replay in
-a protected environment; unscheduled.
+a protected environment; assigned to Part V (next step) as the automated
+release canary script.
 
 **GAP-031 — No type-aware exploration summaries for oversized tool results
 (closed 2026-08-01).** OMP spills oversized results with head+tail elision
@@ -2190,9 +2347,10 @@ bounded output and abort-safe degradation (`src/explore.ts`, `src/tools.ts`,
 
 - [x] Every open gap in the "Gap disposition" section is closed, assigned to
       planned work, or explicitly accepted with a written reason. GAP-026 is
-      partially closed by the Part II status contract; GAP-031 is closed by
-      Candidate A; GAP-021 is partially addressed by Candidate B (remaining
-      dispositions unchanged, accepted).
+      partially closed by the Part II status contract; GAP-021 is partially
+      addressed by Candidate B; GAP-012/023 mitigation and GAP-030 are
+      assigned to Part V (next step). Remaining dispositions unchanged,
+      accepted.
 
 ### Part III (implemented 2026-08-01 — candidates A and B)
 
@@ -2203,6 +2361,24 @@ bounded output and abort-safe degradation (`src/explore.ts`, `src/tools.ts`,
       shows real use; parsers tolerate the absent optional field).
 - [x] Out-of-scope features recorded in Part III stay unimplemented (audit
       point).
+
+### Part IV (implemented and verified 2026-08-01)
+
+- [x] Summary calls run through OMP's auth-retry resolver under `withAuth`
+      (GAP-006 closed): 401 force-refresh, 403/usage-limit rotation,
+      failure text recorded in status.
+- [x] Tier availability gate shares the resolver (`resolveApiKeyOnce`) and
+      rejects the keyless sentinel `"N/A"`.
+- [x] GAP-005 closed: the v1 replay request forwards the session id.
+- [x] GAP-016 closed: replay failures emit one bounded notification per run.
+- [x] GAP-027 closed: `/lcm status` and `/lcm dump` survive reloads via the
+      persisted `lcm-status` session entry.
+- [x] GAP-029 closed: all `@oh-my-pi/*` pins moved to 17.2.3.
+- [x] GAP-032 closed: the tier model wrapper is unwrapped before the
+      completion call.
+- [x] `bun test` → 202 pass, 3 live-skips, 0 fail; typecheck clean.
+- [x] Live integration 5/5 on a real codex Spark subscription (OMP 17.2.3):
+      model-quality summaries, zero deterministic fallback, replay preserved.
 
 ### Testing integrity (plan-wide)
 
