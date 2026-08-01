@@ -64,9 +64,10 @@ describe("credential path", () => {
             lastChance: resolverContext.lastChance,
             hasError: resolverContext.error !== undefined,
           });
-          return resolverContext.error === undefined ||
-            !resolverContext.lastChance
-            ? "fresh-key"
+          // Initial resolves (tier gate) hand back a stale bearer; the
+          // error-driven retry mints a fresh one.
+          return resolverContext.error === undefined
+            ? "stale-key"
             : "rotated-key";
         },
       },
@@ -75,20 +76,22 @@ describe("credential path", () => {
     const controller = createController(c, {
       complete: async (_model, _context, options) => {
         seenKeys.push(options.apiKey as string);
-        if (options.apiKey === "snapshot-key") throw authError("401 expired");
+        if (options.apiKey === "stale-key") throw authError("401 expired");
         return "model prose after refresh";
       },
     });
     await compact(controller);
-    // Leaf and root each start from the tier snapshot and refresh once.
+    // Leaf and root each gate through the resolver (stale), then refresh once.
     expect(seenKeys).toEqual([
-      "snapshot-key",
-      "fresh-key",
-      "snapshot-key",
-      "fresh-key",
+      "stale-key",
+      "rotated-key",
+      "stale-key",
+      "rotated-key",
     ]);
     expect(resolverCalls).toEqual([
+      { lastChance: false, hasError: false },
       { lastChance: false, hasError: true },
+      { lastChance: false, hasError: false },
       { lastChance: false, hasError: true },
     ]);
     expect(controller.status.lastSummaryQuality).toBe("model");

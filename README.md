@@ -84,7 +84,11 @@ own auth-retry resolver (`ModelRegistry.resolver`) wrapped by pi-ai's
 `withAuth`, so stale OAuth bearers (Codex, Gemini CLI, Anthropic, xAI) are
 force-refreshed and rotated instead of degrading summaries to the
 deterministic fallback. Registries that only expose `getApiKey` are wrapped
-with a refresh-aware resolver; the tier snapshot seeds the first attempt.
+with a refresh-aware resolver; the tier snapshot seeds the first attempt, and
+the tier availability gate resolves through the same resolver when one
+exists (the keyless-provider sentinel is never treated as a usable key).
+`/lcm status` and `/lcm dump` survive extension reloads: each run persists a
+bounded diagnostics snapshot as a session entry that registration restores.
 
 The `renderer` setting accepts `auto`, `context-full`, or `snapcompact`.
 `auto` selects snapcompact only for a snapcompact preparation with a

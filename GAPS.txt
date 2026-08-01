@@ -54,9 +54,9 @@ Closure:
 P1: HIGH-SEVERITY GAPS
 ======================
 
-GAP-005: Codex session and compaction context is not forwarded
--------------------------------------------------------------
-Current behavior:
+CLOSED GAP-005: Codex session and compaction context is not forwarded
+--------------------------------------------------------------------
+Current behavior (pre-closure):
   `requestOpenAiRemoteCompaction` is called without `sessionId`,
   `providerSessionState`, or `codexCompaction`. The upstream helper still adds
   basic Codex authentication and attestation headers.
@@ -66,10 +66,12 @@ Why it matters:
   cache continuity, omit required request identity, or cause a provider to
   reject encrypted state even when basic authentication succeeds.
 
-Required closure:
-  Locate the corresponding public values in the extension context or compaction
-  event and pass them through the request options. Add Codex-specific tests that
-  assert the generated compatibility headers and request context.
+Closure:
+  The direct v1 replay request now passes the session id through OMP's
+  published options argument (`{ sessionId }`), so the codex compatibility
+  metadata on the compaction request carries the session routing the main
+  loop uses. The v2 orchestrator path already forwarded the session id.
+  Regression test asserts the forwarded value reaches the v1 call.
 
 CLOSED GAP-006: Credential refresh and authenticated retry are missing
 ---------------------------------------------------------------------
@@ -89,6 +91,12 @@ Closure:
   being silently swallowed. Static keys keep the single-attempt behavior.
   Live-verified on openai-codex/gpt-5.3-codex-spark: leaf and root summaries
   completed as model prose with zero deterministic fallback.
+
+  Tier availability now uses the same credential machinery as the call: the
+  gate resolves through `modelRegistry.resolver` via `resolveApiKeyOnce` when
+  the registry exposes one (bare `getApiKey` registries keep the snapshot
+  gate), and the registry's keyless-provider sentinel (`kNoAuth`, "N/A") is
+  rejected instead of being treated as a usable key.
 
 CLOSED GAP-007: OpenAI V2 streaming replay and migration were missing
 --------------------------------------------------------------------
@@ -242,9 +250,9 @@ Required closure:
 P2: MEDIUM-SEVERITY GAPS
 ========================
 
-GAP-016: Native replay degradation is not proactively surfaced
-----------------------------------------------------------------
-Current behavior:
+CLOSED GAP-016: Native replay degradation is not proactively surfaced
+--------------------------------------------------------------------
+Current behavior (pre-closure):
   `/lcm status` and `/lcm dump` expose replay status and a bounded error, but a
   remote replay failure does not produce a dedicated user warning when textual
   LCM succeeds.
@@ -252,9 +260,12 @@ Current behavior:
 Why it matters:
   Operators can unknowingly continue without provider-native continuity.
 
-Required closure:
-  Emit one concise warning per degraded generation, including status and provider,
-  while avoiding repeated notifications or encrypted payload content.
+Closure:
+  A native replay failure (exception or internal-deadline skip) now emits a
+  concise notification with the bounded reason through the session's notify
+  channel (`LCM native replay failed: <reason>`), once per run, while the
+  textual LCM result still completes. No encrypted payload content is ever
+  included.
 
 GAP-017: No asynchronous soft-threshold or background compaction
 ---------------------------------------------------------------
@@ -417,9 +428,9 @@ Status (2026-08-01): PARTIALLY CLOSED — PLAN.md Part II's runtime-status
 P3: LOWER-SEVERITY GAPS
 =======================
 
-GAP-027: Runtime diagnostics are ephemeral
-------------------------------------------
-Current behavior:
+CLOSED GAP-027: Runtime diagnostics are ephemeral
+------------------------------------------------
+Current behavior (pre-closure):
   `/lcm status` describes only the latest in-memory controller state. Reloading
   the extension or restarting OMP clears it, although installed compaction
   preserve data remains in the session.
@@ -427,9 +438,13 @@ Current behavior:
 Why it matters:
   Post-restart debugging loses the last failure and timing context.
 
-Required closure:
-  Reconstruct safe status fields from active preserve data and optionally persist
-  a bounded diagnostic record without storing credentials or full payloads.
+Closure:
+  Each run persists a bounded diagnostic snapshot as a session custom entry
+  (`lcm-status`, versioned, with the status copied at write time), and
+  registration hydrates the most recent entry into the live status so
+  `/lcm status` and `/lcm dump` keep reporting the last run across reloads.
+  The payload carries no credentials or full payloads; persistence is
+  best-effort and never fails compaction. Round-trip covered by unit tests.
 
 GAP-028: Settings persistence probes multiple manager methods dynamically
 ------------------------------------------------------------------------

@@ -15,11 +15,11 @@ import {
   withOpenAiRemoteCompactionPreserveData,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+  type ApiKey,
+  type ApiKeyResolver,
   complete as completeModel,
   seedApiKeyResolver,
   withAuth,
-  type ApiKey,
-  type ApiKeyResolver,
 } from "@oh-my-pi/pi-ai";
 import { planSummaryBatches, type SummaryBatch } from "./batch.ts";
 import { type LcmConfig, type Renderer, readConfig } from "./config.ts";
@@ -221,6 +221,37 @@ function recordModelCallError(
   const truncated = message.slice(0, 300);
   if (stage === "leaf") status.lastLeafModelError = truncated;
   else status.lastRootModelError = truncated;
+}
+
+interface StatusPersistenceContext {
+  sessionManager?: {
+    appendCustomEntry?: (customType: string, data?: unknown) => unknown;
+  };
+}
+
+/**
+ * Persist the run's diagnostics as a session custom entry so `/lcm status`
+ * survives extension reloads (GAP-027). Best-effort: persistence must never
+ * fail or slow the compaction, and the entry carries no secrets (bounded
+ * error text, model labels, counts).
+ */
+function persistRuntimeStatus(
+  ctx: StatusPersistenceContext | undefined,
+  status: LcmRuntimeStatus,
+): void {
+  try {
+    const manager = ctx?.sessionManager;
+    if (typeof manager?.appendCustomEntry !== "function") return;
+    manager.appendCustomEntry("lcm-status", {
+      version: 1,
+      persistedAt: new Date().toISOString(),
+      // Copy: the session writer may serialize asynchronously, and the live
+      // object is mutated by the next run.
+      status: { ...status },
+    });
+  } catch {
+    // Best-effort diagnostics; never fail compaction over persistence.
+  }
 }
 
 function completionText(response: unknown): string {
@@ -602,8 +633,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       };
       const tierRejections: string[] = [];
       const observeTier =
-        (stage: "leaf" | "root") =>
-        (observation: TierCandidateObservation) => {
+        (stage: "leaf" | "root") => (observation: TierCandidateObservation) => {
           if (!observation.ok)
             tierRejections.push(
               `${stage}:${observation.role}:${observation.label}:${observation.reason}`,
@@ -788,6 +818,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
           nativeReplayStatus = "failed";
           nativeReplayError =
             "internal deadline reached; native replay skipped";
+          notify(deps, `LCM native replay skipped: ${nativeReplayError}`);
         } else if (mechanism) {
           try {
             const credential = await resolveNativeReplayCredential(
@@ -859,6 +890,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
                   nativeHistory,
                   instructions,
                   event.signal,
+                  { sessionId: ctx.sessionManager?.getSessionId?.() },
                 );
                 nativeResult = {
                   preserveData: withOpenAiRemoteCompactionPreserveData(
@@ -918,6 +950,10 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
             nativeReplayStatus = "failed";
             nativeReplayError =
               error instanceof Error ? error.message : String(error);
+            notify(
+              deps,
+              `LCM native replay failed: ${nativeReplayError.slice(0, 300)}`,
+            );
           }
         }
       }
@@ -997,6 +1033,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       else delete status.lastNativeReplayError;
       status.lastOutcome = "success";
       delete status.lastError;
+      persistRuntimeStatus(ctx, status);
       return { compaction: result };
     } catch (error: any) {
       if (event?.signal?.aborted) {
@@ -1007,6 +1044,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       status.lastOutcome = "cancelled";
       status.lastError = message.slice(0, 300);
       notify(deps, message);
+      persistRuntimeStatus(ctx, status);
       return { cancel: true };
     }
   };

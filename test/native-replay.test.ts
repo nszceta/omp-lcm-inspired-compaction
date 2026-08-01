@@ -105,6 +105,106 @@ describe("provider-native replay", () => {
     expect(controller.status.lastNativeReplaySeeded).toBe(false);
   });
 
+  test("forwards the session id on the direct v1 compaction request", async () => {
+    const context = openAiContext();
+    context.sessionManager = {
+      ...artifactStore(),
+      getSessionId: () => "session-v1",
+    };
+    const sessionIds: Array<string | undefined> = [];
+    const controller = createController(context, {
+      summaryCall: async () => "local semantic summary",
+      requestNativeCompaction: async (
+        _model,
+        _key,
+        _input,
+        _instructions,
+        _signal,
+        options,
+      ) => {
+        sessionIds.push(options?.sessionId);
+        return replayResponse("cipher-v1-session");
+      },
+    });
+    await controller.beforeCompact(
+      event(
+        preparation("keep", {
+          messagesToSummarize: [userMessage("discarded first turn", 1)],
+          settings: { strategy: "context-full", remoteEnabled: true },
+        }),
+        [entry("old", "source detail ".repeat(100)), entry("keep")],
+      ),
+    );
+    expect(sessionIds).toEqual(["session-v1"]);
+    expect(controller.status.lastNativeReplayStatus).toBe("preserved");
+  });
+
+  test("notifies when native replay fails and keeps the LCM result", async () => {
+    const context = openAiContext();
+    const notifications: string[] = [];
+    const controller = createController(context, {
+      summaryCall: async () => "local semantic summary",
+      notify: (message) => notifications.push(message),
+      requestNativeCompaction: async () => {
+        throw new Error("replay endpoint exploded");
+      },
+    });
+    const result = await controller.beforeCompact(
+      event(
+        preparation("keep", {
+          messagesToSummarize: [userMessage("discarded first turn", 1)],
+          settings: { strategy: "context-full", remoteEnabled: true },
+        }),
+        [entry("old", "source detail ".repeat(100)), entry("keep")],
+      ),
+    );
+    expect(result.compaction).toBeDefined();
+    expect(controller.status.lastNativeReplayStatus).toBe("failed");
+    expect(controller.status.lastNativeReplayError).toBe(
+      "replay endpoint exploded",
+    );
+    expect(notifications.some((m) => m.includes("native replay failed"))).toBe(
+      true,
+    );
+    expect(notifications.some((m) => m.includes("replay endpoint exploded"))).toBe(
+      true,
+    );
+  });
+
+  test("persists the run diagnostics as a session custom entry", async () => {
+    const context = openAiContext();
+    const customEntries: Array<{ customType: string; data: unknown }> = [];
+    context.sessionManager = {
+      ...artifactStore(),
+      appendCustomEntry: (customType: string, data: unknown) => {
+        customEntries.push({ customType, data });
+        return "custom-1";
+      },
+    };
+    const controller = createController(context, {
+      summaryCall: async () => "local semantic summary",
+      requestNativeCompaction: async () => replayResponse("cipher-persist"),
+    });
+    await controller.beforeCompact(
+      event(
+        preparation("keep", {
+          messagesToSummarize: [userMessage("discarded first turn", 1)],
+          settings: { strategy: "context-full", remoteEnabled: true },
+        }),
+        [entry("old", "source detail ".repeat(100)), entry("keep")],
+      ),
+    );
+    expect(customEntries).toHaveLength(1);
+    expect(customEntries[0]?.customType).toBe("lcm-status");
+    const persisted = customEntries[0]?.data as {
+      version?: number;
+      status?: { lastOutcome?: string; lastNativeReplayStatus?: string };
+    };
+    expect(persisted.version).toBe(1);
+    expect(persisted.status?.lastOutcome).toBe("success");
+    expect(persisted.status?.lastNativeReplayStatus).toBe("preserved");
+  });
+
   test("delegates V2 replay to OMP's streaming compaction orchestrator", async () => {
     const context = openAiContext();
     context.model.remoteCompaction = { v2StreamingEnabled: true };

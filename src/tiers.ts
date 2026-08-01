@@ -1,3 +1,5 @@
+import { type ApiKeyResolver, resolveApiKeyOnce } from "@oh-my-pi/pi-ai";
+
 export type SummaryModelTier = "tiny" | "smol" | "active";
 
 export interface TierModelInfo {
@@ -20,6 +22,8 @@ export interface TierResolverDeps {
       sessionId?: string,
       options?: { signal?: AbortSignal },
     ) => Promise<string | undefined>;
+    /** Registry auth-retry resolver; preferred over a getApiKey snapshot. */
+    resolver?: (model: unknown, sessionId?: string) => ApiKeyResolver;
     hasConfiguredAuth?: (model: unknown) => boolean;
   };
   sessionId?: string;
@@ -36,12 +40,7 @@ export interface TierCandidateObservation {
   role: SummaryModelTier;
   label: string; // "provider/id", or "(none)" when no candidate model exists
   ok: boolean;
-  reason:
-    | "no-candidate"
-    | "not-text"
-    | "context-too-small"
-    | "no-key"
-    | "ok";
+  reason: "no-candidate" | "not-text" | "context-too-small" | "no-key" | "ok";
 }
 
 export interface ResolveTierOptions {
@@ -128,7 +127,10 @@ export async function resolveSummaryModel(
   deps: TierResolverDeps,
   options: ResolveTierOptions = {},
 ): Promise<ResolvedSummaryModel | undefined> {
-  const emit = (role: SummaryModelTier, observation: Omit<TierCandidateObservation, "role">) => {
+  const emit = (
+    role: SummaryModelTier,
+    observation: Omit<TierCandidateObservation, "role">,
+  ) => {
     options.onCandidate?.({ role, ...observation });
   };
   for (const role of chain) {
@@ -176,15 +178,24 @@ export async function resolveSummaryModel(
       continue;
     }
 
-    // Credentials must resolve for the candidate model itself.
-    const apiKey = await deps.modelRegistry?.getApiKey?.(
-      candidate,
-      deps.sessionId,
-      {
-        signal: options.signal,
-      },
-    );
-    if (!apiKey) {
+    // Credentials must resolve for the candidate model itself. Prefer the
+    // registry's auth-retry resolver so the gate and the summary call share
+    // one credential machinery (GAP-006 consistency; the call path seeds from
+    // this same snapshot). Bare getApiKey registries keep the snapshot gate.
+    const registry = deps.modelRegistry;
+    const apiKey = registry?.resolver
+      ? await resolveApiKeyOnce(
+          registry.resolver(candidate, deps.sessionId),
+          options.signal,
+        )
+      : await registry?.getApiKey?.(candidate, deps.sessionId, {
+          signal: options.signal,
+        });
+    // kNoAuth ("N/A") is the pi-coding-agent registry's keyless-provider
+    // sentinel (model-registry.ts `export const kNoAuth = "N/A"`); it is not
+    // a usable credential. Compared literally to avoid a runtime coupling to
+    // the peer package for one constant.
+    if (!apiKey || apiKey === "N/A") {
       emit(role, { label, ok: false, reason: "no-key" });
       continue;
     }

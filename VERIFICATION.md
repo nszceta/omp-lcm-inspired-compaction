@@ -251,8 +251,76 @@ encrypted V2 replacement history, generation chaining with
 
 ## Known accepted limitations recorded in this pass
 
-- Tier resolution remains availability-gated on a `getApiKey` snapshot; the
-  call itself refreshes through the resolver, and per-candidate rejections are
-  now recorded in status (`lastTierRejections`).
+- Tier resolution gate behavior: registries exposing `resolver` gate on the
+  resolver path (shared with the call); bare `getApiKey` registries keep the
+  snapshot gate, and per-candidate rejections are recorded in status
+  (`lastTierRejections`).
 - The repo-wide biome `check` failure (legacy `any` sites) predates this
   work and is left as debt; changed files are clean.
+
+# Verification log — Part V (2026-08-01): reliability follow-ups, live-verified
+
+Package: `omp-lcm-inspired-compaction` 0.2.2 (OMP 17.2.3)
+
+## Fixes in this pass
+
+1. **Tier gate shares the resolver machinery (GAP-006 follow-up).** The
+   availability gate now resolves through `modelRegistry.resolver` via
+   `resolveApiKeyOnce` when the registry exposes one, so the gate and the call
+   use the same credential path (initial → force-refresh → rotate); bare
+   `getApiKey` registries keep the snapshot gate. The registry's
+   keyless-provider sentinel (`kNoAuth`, "N/A") is rejected instead of being
+   treated as a usable key — previously a keyless candidate could be
+   "resolved" and seeded into the call.
+2. **GAP-005 closed.** The direct v1 replay request now forwards the session
+   id through OMP's published options argument (`{ sessionId }`); regression
+   test asserts the value reaches the v1 call. (17.2.3 signature: signal is
+   the 5th parameter, options the 6th.)
+3. **GAP-016 closed.** Native replay failures (exception or internal-deadline
+   skip) now emit a bounded notification (`LCM native replay failed:
+   <reason>`) once per run while the textual LCM result still completes.
+4. **GAP-027 closed.** Each run persists a bounded diagnostic snapshot as a
+   session custom entry (`lcm-status`, version 1, status copied at write
+   time); registration hydrates the most recent entry into live status, so
+   `/lcm status` and `/lcm dump` keep reporting the last run across reloads.
+   Persistence is best-effort and never fails compaction.
+
+## Full tests and static checks
+
+```text
+$ bun test
+202 pass
+3 skip (live integration, gated on LCM_LIVE_INTEGRATION=1)
+0 fail
+Ran 205 tests across 21 files.
+$ bun run typecheck
+tsc --noEmit: clean
+```
+
+New/updated tests: `test/tiers.test.ts` credential-gate suite (resolver gate,
+`kNoAuth` rejection on both paths), `test/native-replay.test.ts` (v1 session
+forwarding, replay-failure notification, status persistence), and
+`test/omp-profile.test.ts` (status hydration across a simulated reload).
+Changed files remain biome-clean apart from pre-existing legacy `any` sites.
+
+## Live verification — real codex Spark subscription (OMP 17.2.3)
+
+```text
+$ LCM_LIVE_INTEGRATION=1 bun test test/native-replay.integration.test.ts
+5 pass
+0 fail
+34 expect() calls
+Ran 5 tests across 1 file. [24.57s]
+```
+
+All five tests pass after the fixes: model-quality leaf/root summaries on
+Spark (zero deterministic fallback), Spark→Luna lineage switch, encrypted V2
+replacement history across two compactions, and both offline reconstruction
+tests.
+
+Coverage boundary: the live Spark suite exercises fix 1 (resolver gate +
+credential path) end to end. Fixes 2–4 (GAP-005 v1 session forwarding,
+GAP-016 replay-failure notification, GAP-027 status persistence) are
+unit-verified — the live run's Spark session selects the v2 replay path and
+replay succeeds, so neither the v1 request shape nor the failure notification
+fires on it.

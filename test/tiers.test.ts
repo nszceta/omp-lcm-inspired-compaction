@@ -401,6 +401,49 @@ describe("getApiKey passthrough", () => {
   });
 });
 
+describe("credential gate", () => {
+  test("prefers the registry resolver for the availability gate", async () => {
+    const resolverCalls: Array<{ model: unknown; sessionId?: string }> = [];
+    const deps: TierResolverDeps = {
+      models: { resolve: (spec) => (spec === "@tiny" ? TINY : undefined) },
+      modelRegistry: {
+        getApiKey: async () => "snapshot-key",
+        resolver: (model, sessionId) => {
+          resolverCalls.push({ model, sessionId });
+          return async () => "resolver-key";
+        },
+      },
+      sessionId: "sess-gate",
+    };
+    const resolved = await resolveSummaryModel(["tiny"], deps, {});
+    expect(resolved?.apiKey).toBe("resolver-key");
+    expect(resolved?.role).toBe("tiny");
+    expect(resolverCalls).toEqual([{ model: TINY, sessionId: "sess-gate" }]);
+  });
+
+  test("rejects the kNoAuth sentinel from getApiKey", async () => {
+    const deps: TierResolverDeps = {
+      models: { resolve: (spec) => (spec === "@tiny" ? TINY : undefined) },
+      modelRegistry: { getApiKey: async () => "N/A" },
+    };
+    const resolved = await resolveSummaryModel(["tiny", "active"], deps, {
+      activeModel: ACTIVE,
+    });
+    expect(resolved).toBeUndefined();
+  });
+
+  test("rejects the kNoAuth sentinel from the resolver gate", async () => {
+    const deps: TierResolverDeps = {
+      models: { resolve: (spec) => (spec === "@tiny" ? TINY : undefined) },
+      modelRegistry: {
+        resolver: () => async () => "N/A",
+      },
+    };
+    const resolved = await resolveSummaryModel(["tiny"], deps, {});
+    expect(resolved).toBeUndefined();
+  });
+});
+
 describe("batchBudgetFor boundaries", () => {
   test("undefined or non-finite window returns the configured maximum", () => {
     expect(batchBudgetFor(48_000, undefined)).toBe(48_000);

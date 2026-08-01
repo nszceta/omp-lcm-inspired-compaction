@@ -144,4 +144,50 @@ describe("custom OMP test profile", () => {
     expect(dump).toContain("Summary: runtime expansion succeeded");
     expect(notifications).toEqual([version, status, dump]);
   });
+
+  test("restores the last persisted diagnostics after a reload", async () => {
+    const commands = new Map<
+      string,
+      { handler: (args: string, ctx: unknown) => Promise<string> }
+    >();
+    const api = {
+      on() {},
+      registerCommand(
+        name: string,
+        options: { handler: (args: string, ctx: unknown) => Promise<string> },
+      ) {
+        commands.set(name, options);
+      },
+      registerTool() {},
+    };
+    const persisted = {
+      lastOutcome: "success",
+      lastGeneration: 4,
+      lastDeterministicFallbackCount: 1,
+    };
+    const sessionManager = {
+      ...artifactStore(),
+      getEntries: () => [
+        {
+          type: "custom",
+          customType: "lcm-status",
+          data: { version: 1, persistedAt: "2026-08-01T00:00:00.000Z", status: persisted },
+        },
+      ],
+    };
+    const context = {
+      cwd: "/tmp/omp-lcm-profile",
+      model: fakeModel(false),
+      sessionManager,
+      modelRegistry: { getApiKey: async () => "profile-key" },
+    };
+    const controller = createLcmExtension({})(api, context);
+    expect(controller.status).toEqual({});
+    const command = commands.get("lcm");
+    expect(command).toBeDefined();
+    const output = await command?.handler("status", context);
+    expect(output).toContain('"lastOutcome": "success"');
+    expect(output).toContain('"lastGeneration": 4');
+    expect(output).toContain('"lastDeterministicFallbackCount": 1');
+  });
 });

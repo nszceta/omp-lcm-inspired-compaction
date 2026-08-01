@@ -5,6 +5,7 @@ import {
   type ControllerDeps,
   createController,
   type LcmController,
+  type LcmRuntimeStatus,
 } from "./controller.ts";
 import {
   createLcmExpandHandler,
@@ -66,6 +67,46 @@ const RENDERER_COMPLETIONS = ["auto", "context-full", "snapcompact"].map(
   }),
 );
 
+interface StatusHydrationContext {
+  sessionManager?: {
+    getEntries?: () => Array<{
+      type?: unknown;
+      customType?: unknown;
+      data?: unknown;
+    }>;
+  };
+}
+
+/**
+ * Restore the last persisted diagnostics (GAP-027): the most recent
+ * `lcm-status` custom entry becomes the starting status after an extension
+ * reload, so `/lcm status` keeps reporting the last run. Best-effort and
+ * synchronous (`getEntries` is in-memory); never fails registration.
+ */
+function hydrateStatus(
+  runtimeContext: StatusHydrationContext | undefined,
+  status: LcmRuntimeStatus,
+): void {
+  try {
+    const entries = runtimeContext?.sessionManager?.getEntries?.();
+    if (!Array.isArray(entries)) return;
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      const data =
+        entry?.type === "custom" && entry.customType === "lcm-status"
+          ? entry.data
+          : undefined;
+      if (!data || typeof data !== "object") continue;
+      const persisted = (data as { status?: unknown }).status;
+      if (persisted && typeof persisted === "object")
+        Object.assign(status, persisted);
+      return;
+    }
+  } catch {
+    // Best-effort hydration; never fail registration over it.
+  }
+}
+
 export function registerExtension(
   api: any,
   ctx: any,
@@ -73,11 +114,15 @@ export function registerExtension(
 ) {
   const runtimeStatus = deps.status ?? {};
   let controller: LcmController | undefined;
-  const ensure = (runtimeContext = ctx): LcmController =>
-    (controller ??= createController(runtimeContext, {
+  const ensure = (runtimeContext = ctx): LcmController => {
+    if (controller) return controller;
+    hydrateStatus(runtimeContext, runtimeStatus);
+    controller = createController(runtimeContext, {
       ...deps,
       status: runtimeStatus,
-    }));
+    });
+    return controller;
+  };
   if (typeof api.registerTool === "function") {
     registerLcmExpandTool(api, ctx);
     registerLcmDescribeTool(api, ctx);
