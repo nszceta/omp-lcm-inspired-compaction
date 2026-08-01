@@ -118,6 +118,46 @@ export class Deadline {
 }
 
 /**
+ * Settle with `promise`'s result, or reject as soon as `signal` aborts with
+ * an AbortError carrying the signal's reason. The underlying promise is not
+ * cancelled; it may keep running after the race settles.
+ */
+export function raceWithSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      const reason = signal.reason;
+      reject(
+        reason instanceof Error
+          ? reason
+          : Object.assign(new Error("The operation was aborted"), {
+              name: "AbortError",
+              reason,
+            }),
+      );
+    };
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    // Always consume the underlying promise so a late rejection is handled.
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
  * Join signals into one that aborts with the reason of the first (in array
  * order) input that aborts. An already-aborted input aborts the result
  * immediately.

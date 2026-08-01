@@ -309,4 +309,64 @@ describe("controller", () => {
     expect(controller.status.lastOutcome).toBe("success");
     expect(controller.status.lastOrphanArtifactCount).toBe(0);
   });
+  test("native replay past the internal deadline degrades to success", async () => {
+    // Regression: a native compaction call that ignores abort signals and
+    // never settles used to run the handler into OMP's 30s wall. The internal
+    // deadline must bound it and the run must still complete successfully.
+    const c = ctx({
+      id: "fake-model",
+      input: ["text"],
+      provider: "openai",
+      remoteCompaction: {
+        v2StreamingEnabled: true,
+        api: "openai-responses",
+      },
+    });
+    const controller = createController(c, {
+      summaryCall: async () => "summary",
+      config: { handlerDeadlineMs: 500 },
+      nativeCompact: () => new Promise<never>(() => {}),
+    });
+    const startedAt = Date.now();
+    const result = await controller.beforeCompact(
+      event(
+        preparation("keep", {
+          messagesToSummarize: ["discarded"],
+          settings: { strategy: "context-full", remoteEnabled: true },
+        }),
+        [entry("old"), entry("keep")],
+      ),
+    );
+    const elapsed = Date.now() - startedAt;
+    expect(result.compaction).toBeDefined();
+    expect(controller.status.lastOutcome).toBe("success");
+    expect(controller.status.lastNativeReplayStatus).toBe("failed");
+    expect(controller.status.lastNativeReplayError).toContain(
+      "internal deadline",
+    );
+    expect(controller.status.lastDeadlineStage).toBe("native-replay");
+    expect(elapsed).toBeLessThan(5_000);
+  }, 10_000);
+  test("plugin settings hang falls back to defaults within the prelude", async () => {
+    // Regression: a hanging plugin-settings lookup used to stall the handler
+    // before any deadline existed; the prelude must bound it and the run must
+    // continue with default config.
+    const c = ctx();
+    const controller = createController(c, {
+      summaryCall: async () => "summary",
+      getPluginSettings: () => new Promise<unknown>(() => {}),
+    });
+    const startedAt = Date.now();
+    const result = await controller.beforeCompact(
+      event(preparation("keep", { messagesToSummarize: ["discarded"] }), [
+        entry("old"),
+        entry("keep"),
+      ]),
+    );
+    const elapsed = Date.now() - startedAt;
+    expect(result.compaction).toBeDefined();
+    expect(controller.status.lastOutcome).toBe("success");
+    expect(elapsed).toBeGreaterThanOrEqual(3_500);
+    expect(elapsed).toBeLessThan(10_000);
+  }, 10_000);
 });

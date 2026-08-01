@@ -400,3 +400,83 @@ closed exactly as designed: pack, extract, clean-profile install, and
 `lcm-canary-*` profile directory or temp state remains after the run. A
 credentialed run is the release gate; the manual live loop remains the
 documented exception.
+
+# Verification log — OMP 30s handler-wall hotfix (2026-08-01, GAP-032)
+
+Package: `omp-lcm-inspired-compaction` 0.2.3 (OMP 17.2.3)
+
+## Field failure
+
+Resumed session log (2026-08-01 19:17:41, `~/.omp/logs/omp.*.log`):
+
+```json
+{"level":"warn","message":"Extension handler timed out",
+ "extensionPath":".../omp-lcm-inspired-compaction/src/index.ts",
+ "event":"session_before_compact","timeoutMs":30000}
+```
+
+`/lcm version` answered v0.2.3 (extension loaded, commands dispatch), but
+`/lcm status` returned `{}`: the aborted run never persisted status, the
+harness fell back to built-in compaction, and the run's artifacts were left
+unreachable.
+
+## Root cause
+
+OMP's extension runner aborts `session_before_compact` handlers after a
+fixed 30 000 ms. The plugin's internal deadline (default 24 s) bounded only
+the leaf/root summary calls; the provider-native replay call, config
+loading, the API-key preflight, capture, orphan accounting, tier
+resolution, the DAG write loop, and snapcompact rendering were bounded only
+by OMP's 30 s signal. A slow native compaction call ran the handler into
+the wall.
+
+## Fix (GAP-032 closure)
+
+- Prelude deadline (4 s from handler start) races config loading; expiry
+  falls back to default config instead of failing the run.
+- Absolute total deadline (`Deadline.at(startedAt + handlerDeadlineMs)`, max
+  27 s < 30 s) created before any other await; its signal is wired into the
+  API-key preflight, capture, orphan accounting, tier resolution, root model
+  calls, the native replay call, and snapcompact rendering.
+- `raceWithSignal` in src/deadline.ts guarantees a bound even against
+  signal-ignoring callees (underlying promise is consumed, never cancelled).
+- Internal deadline expiry degrades instead of cancelling: tier resolution
+  falls back to the active model, root/leaf calls fall back deterministically,
+  native replay is skipped with a recorded reason, and the DAG write loop
+  checks only user cancellation (writes are fast file ops).
+- Deadline aborts persist status and return `{ cancel: true }` well inside
+  the wall; user-cancel semantics are unchanged.
+
+## Regression evidence (test-first)
+
+`test/controller.test.ts`:
+
+- A never-settling, signal-ignoring `nativeCompact` previously hung the
+  handler past its internal deadline (test timed out); now the handler
+  resolves within seconds with `lastOutcome success`, native replay recorded
+  as failed with "internal deadline reached", and `lastDeadlineStage`
+  `native-replay`.
+- A hanging plugin-settings loader previously stalled `readConfig` before any
+  deadline existed; now the run completes with default config within the
+  prelude bound.
+
+`test/controller-deadline.test.ts` (frozen wall-clock contract, no fake
+clocks): the deadline-reserve-exhausted run now records the root stage as the
+first deadline-affected stage (root condensation aborts at the internal
+deadline instead of running past it), native replay is skipped, and a
+compaction result is still produced.
+
+## Final state
+
+```text
+$ bun run typecheck      # clean
+$ bun test               # 224 pass, 3 skip, 0 fail (1107 expects)
+$ LCM_LIVE_INTEGRATION=1 bun test test/native-replay.integration.test.ts
+                         # 5/5 pass, model-quality summaries
+                         # (lastSummaryQuality model, zero fallbacks),
+                         # native replay preserved
+```
+
+Live runs still finish with the internal budget intact: full model quality
+and `lastNativeReplayStatus preserved` are asserted by the integration
+suite and pass.

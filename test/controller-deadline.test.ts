@@ -351,7 +351,11 @@ describe("controller deadlines and tiers", () => {
     expect(controller.status.lastNativeReplayError).toContain(
       "internal deadline reached",
     );
-    expect(controller.status.lastDeadlineStage).toBe("native-replay");
+    // Root condensation now aborts at the internal deadline (it previously ran
+    // past it), so the first deadline-affected stage is "root"; the native
+    // replay skip is downstream of the same expiry. If root calls ever stop
+    // honoring the deadline again, this assertion fails.
+    expect(controller.status.lastDeadlineStage).toBe("root");
   });
 
   test("runs provider-native replay when the deadline reserve is intact", async () => {

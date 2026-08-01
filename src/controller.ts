@@ -22,10 +22,15 @@ import {
   withAuth,
 } from "@oh-my-pi/pi-ai";
 import { planSummaryBatches, type SummaryBatch } from "./batch.ts";
-import { type LcmConfig, type Renderer, readConfig } from "./config.ts";
+import {
+  configFromSettings,
+  type LcmConfig,
+  type Renderer,
+  readConfig,
+} from "./config.ts";
 import { parseLcmPreserveState } from "./contracts.ts";
 import { buildDag } from "./dag.ts";
-import { Deadline } from "./deadline.ts";
+import { Deadline, raceWithSignal } from "./deadline.ts";
 import { countOrphanArtifacts, orphanStoreFor } from "./orphans.ts";
 import { runBoundedPool } from "./pool.ts";
 import { renderContextFull } from "./render-context-full.ts";
@@ -84,7 +89,7 @@ export interface LcmRuntimeStatus {
   lastPreserveKeys?: string[];
   lastSnapcompactFrameCount?: number;
   builtInRemoteContextFullIntercepted?: boolean;
-  lastOutcome?: "running" | "success" | "cancelled";
+  lastOutcome?: "running" | "success" | "cancelled" | "error";
   lastSummaryQuality?: "model" | "deterministic-fallback";
   lastDeterministicFallbackCount?: number;
   lastNativeReplayStatus?:
@@ -286,6 +291,15 @@ function completionText(response: unknown): string {
 function notify(deps: ControllerDeps, text: string) {
   deps.notify?.(text);
   deps.log?.(text);
+}
+
+/** True when an error is the plugin's own deadline abort (see src/deadline.ts). */
+function isDeadlineAbort(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "AbortError" &&
+    (error as Error & { reason?: unknown }).reason === "lcm-deadline"
+  );
 }
 
 function boundedPreview(value: unknown, maxLength = 2_000): string | undefined {
@@ -492,6 +506,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
   const status: LcmRuntimeStatus = deps.status ?? {};
   const resolveTier = injected.resolveTier ?? resolveSummaryModel;
   const beforeCompact = async (event: any): Promise<any> => {
+    let total: Deadline | undefined;
     try {
       status.lastOutcome = "running";
       status.lastStartedAt = new Date().toISOString();
@@ -505,17 +520,32 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       if (!event?.preparation)
         throw new Error("Missing compaction preparation");
       if (!ctx?.model) throw new Error("No active model");
+      // The prelude bounds config loading only; the total deadline starts at
+      // handler start so prelude time counts against the full budget.
+      const prelude = Deadline.at(startedAt + 4_000, {
+        signal: event.signal,
+      });
       const config: LcmConfig = {
-        ...(await readConfig(ctx, injected as any)),
+        ...(await raceWithSignal(
+          readConfig(ctx, injected as any),
+          prelude.signal,
+        ).catch(() => configFromSettings(undefined))),
         ...injected.config,
       };
+      total = Deadline.at(startedAt + config.handlerDeadlineMs, {
+        signal: event.signal,
+      });
+      const totalSignal = total.signal;
       const settings = event.preparation.settings ?? {};
       if (
         !injected.summaryCall &&
         !injected.complete &&
         ctx.modelRegistry?.getApiKey
       ) {
-        const key = await ctx.modelRegistry.getApiKey(ctx.model);
+        const key = await raceWithSignal(
+          ctx.modelRegistry.getApiKey(ctx.model),
+          total.signal,
+        );
         if (!key) throw new Error("No API key for active model");
       }
       const renderer: Renderer =
@@ -543,19 +573,19 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
           status.lastOrphanArtifactCount = await countOrphanArtifacts(
             orphanStore,
             prior?.roots ?? [],
-            { signal: event.signal },
+            { signal: total.signal, maxNodeReads: 1000 },
           );
         } catch {
           // best-effort observability; never fail the run over accounting
         }
       }
-      const capture = await (deps.capture ?? captureRawSource)(event, undefined, {
-        contextWindow: ctx.model?.contextWindow,
-      });
+      const capture = await raceWithSignal(
+        (deps.capture ?? captureRawSource)(event, undefined, {
+          contextWindow: ctx.model?.contextWindow,
+        }),
+        total.signal,
+      );
       status.lastRawChunkCount = capture.chunks.length;
-      const total = new Deadline(config.handlerDeadlineMs, {
-        signal: event.signal,
-      });
       const leafStageMs = Math.floor((config.handlerDeadlineMs * 14) / 24);
       const replayRenderMs = Math.floor((config.handlerDeadlineMs * 4) / 24);
       const leafDeadline = new Deadline(leafStageMs, {
@@ -654,16 +684,25 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         };
       let leafModel: ResolvedSummaryModel | undefined;
       if (tiersActive) {
-        leafModel = await resolveTier(
-          preferredChain(config.leafSummaryModel, TIER_CHAINS.leaf),
-          tierDeps,
-          {
-            signal: event.signal,
-            activeModel: ctx.model,
-            minContextWindow: SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
-            onCandidate: observeTier("leaf"),
-          },
-        );
+        try {
+          leafModel = await resolveTier(
+            preferredChain(config.leafSummaryModel, TIER_CHAINS.leaf),
+            tierDeps,
+            {
+              signal: total.signal,
+              activeModel: ctx.model,
+              minContextWindow:
+                SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
+              onCandidate: observeTier("leaf"),
+            },
+          );
+        } catch (error) {
+          // Internal deadline expiry degrades to the active-model path
+          // (its calls are deadline-bounded and fall back deterministically);
+          // real failures and user cancellation still propagate.
+          if (event.signal?.aborted) throw error;
+          if (!isDeadlineAbort(error) && total?.expired() !== true) throw error;
+        }
         status.lastLeafSummaryModel = leafModel?.label;
       }
       status.lastSummaryConcurrency = config.summaryConcurrency;
@@ -746,16 +785,25 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       const generation = (prior?.generation ?? 0) + 1;
       let rootModel: ResolvedSummaryModel | undefined;
       if (tiersActive) {
-        rootModel = await resolveTier(
-          preferredChain(config.rootSummaryModel, TIER_CHAINS.root),
-          tierDeps,
-          {
-            signal: event.signal,
-            activeModel: ctx.model,
-            minContextWindow: SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
-            onCandidate: observeTier("root"),
-          },
-        );
+        try {
+          rootModel = await resolveTier(
+            preferredChain(config.rootSummaryModel, TIER_CHAINS.root),
+            tierDeps,
+            {
+              signal: total.signal,
+              activeModel: ctx.model,
+              minContextWindow:
+                SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
+              onCandidate: observeTier("root"),
+            },
+          );
+        } catch (error) {
+          // Same graceful degrade as the leaf tier: deadline expiry falls
+          // back to the active model (deadline-bounded, deterministic
+          // fallback); real failures and user cancellation propagate.
+          if (event.signal?.aborted) throw error;
+          if (!isDeadlineAbort(error) && total?.expired() !== true) throw error;
+        }
         status.lastRootSummaryModel = rootModel?.label;
       }
       status.lastTierRejections = tierRejections.slice(0, 8);
@@ -797,7 +845,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
             input: root.summary,
             targetTokens,
             category: "degraded LCM root repair",
-            signal: event.signal,
+            signal: totalSignal,
           });
           return repaired.level === "deterministic"
             ? undefined
@@ -809,9 +857,14 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
               input,
               targetTokens,
               category: "LCM root condensation",
-              signal: event.signal,
+              signal: totalSignal,
             })
           ).prose,
+        // Write-loop abort checks observe user cancellation only: the raw/node
+        // writes are fast file ops that must complete even when the internal
+        // deadline expires mid-loop, so the run degrades (deterministic
+        // fallbacks) instead of cancelling. Model calls inside the loop are
+        // bounded separately via the request signals above.
         signal: event.signal,
       });
       let nativeReplayStatus: NonNullable<
@@ -837,7 +890,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
           try {
             const credential = await resolveNativeReplayCredential(
               ctx,
-              event.signal,
+              total.signal,
             );
             if (!credential) {
               nativeReplayStatus = "unavailable";
@@ -898,13 +951,16 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
                   ctx.model,
                   compatible ? previousReplay?.replacementHistory : undefined,
                 );
-                const remote = await deps.requestNativeCompaction(
-                  ctx.model,
-                  credential.apiKey,
-                  nativeHistory,
-                  instructions,
-                  event.signal,
-                  { sessionId: ctx.sessionManager?.getSessionId?.() },
+                const remote = await raceWithSignal(
+                  deps.requestNativeCompaction(
+                    ctx.model,
+                    credential.apiKey,
+                    nativeHistory,
+                    instructions,
+                    total.signal,
+                    { sessionId: ctx.sessionManager?.getSessionId?.() },
+                  ),
+                  total.signal,
                 );
                 nativeResult = {
                   preserveData: withOpenAiRemoteCompactionPreserveData(
@@ -914,19 +970,22 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
                 };
               } else {
                 const compact = deps.nativeCompact ?? runOmpCompaction;
-                nativeResult = await compact(
-                  nativePreparation,
-                  ctx.model,
-                  credential.apiKey,
-                  instructions,
-                  event.signal,
-                  {
-                    remoteInstructions: instructions,
-                    thinkingLevel: activeThinkingLevel(
-                      event.branchEntries ?? [],
-                    ),
-                    sessionId: ctx.sessionManager?.getSessionId?.(),
-                  },
+                nativeResult = await raceWithSignal(
+                  compact(
+                    nativePreparation,
+                    ctx.model,
+                    credential.apiKey,
+                    instructions,
+                    total.signal,
+                    {
+                      remoteInstructions: instructions,
+                      thinkingLevel: activeThinkingLevel(
+                        event.branchEntries ?? [],
+                      ),
+                      sessionId: ctx.sessionManager?.getSessionId?.(),
+                    },
+                  ),
+                  total.signal,
                 );
               }
               const replay = nativeReplayData(nativeResult.preserveData);
@@ -961,13 +1020,21 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
             }
           } catch (error) {
             if (event.signal?.aborted) throw error;
-            nativeReplayStatus = "failed";
-            nativeReplayError =
-              error instanceof Error ? error.message : String(error);
-            notify(
-              deps,
-              `LCM native replay failed: ${nativeReplayError.slice(0, 300)}`,
-            );
+            if (total?.expired() === true || isDeadlineAbort(error)) {
+              status.lastDeadlineStage ??= "native-replay";
+              nativeReplayStatus = "failed";
+              nativeReplayError =
+                "internal deadline reached; native replay skipped";
+              notify(deps, `LCM native replay skipped: ${nativeReplayError}`);
+            } else {
+              nativeReplayStatus = "failed";
+              nativeReplayError =
+                error instanceof Error ? error.message : String(error);
+              notify(
+                deps,
+                `LCM native replay failed: ${nativeReplayError.slice(0, 300)}`,
+              );
+            }
           }
         }
       }
@@ -986,7 +1053,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
               preparation: event.preparation,
               state: dag.state,
               model: ctx.model,
-              signal: event.signal,
+              signal: total.signal,
               onResult: (snapResult) => {
                 status.lastSnapcompactFrameCount = frameCount(snapResult);
               },
@@ -1052,6 +1119,13 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
     } catch (error: any) {
       if (event?.signal?.aborted) {
         status.lastOutcome = "cancelled";
+        return { cancel: true };
+      }
+      if (isDeadlineAbort(error) || total?.expired() === true) {
+        status.lastOutcome = "error";
+        status.lastError = "internal deadline reached";
+        status.lastDeadlineStage ??= "total";
+        persistRuntimeStatus(ctx, status);
         return { cancel: true };
       }
       const message = error instanceof Error ? error.message : String(error);

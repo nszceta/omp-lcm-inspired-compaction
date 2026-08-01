@@ -557,6 +557,45 @@ Status (2026-08-01): CLOSED — Candidate A shipped: `lcm_describe` explore mode
   src/explore.ts and src/tools.ts, covered by test/explore.test.ts and
   test/tools.test.ts. Metadata-only mode performs no model call.
 
+CLOSED GAP-032: OMP's fixed 30s handler wall can abort the compaction hook
+------------------------------------------------------------------------
+Current behavior (pre-closure):
+  OMP's extension runner aborts `session_before_compact` handlers after a
+  fixed 30 000 ms and falls back to built-in compaction. The plugin's internal
+  deadline (default 24 s) bounded only the leaf/root summary calls: config
+  loading, the API-key preflight, raw capture, orphan accounting, tier
+  resolution, the DAG write loop, the provider-native replay call, and
+  snapcompact rendering were bounded only by OMP's 30 s signal, so a slow
+  native compaction call ran the handler into the wall. Observed in the field:
+  `Extension ... handler timed out after 30000ms` (event session_before_compact,
+  OMP log 2026-08-01); the run produced no persisted status (`/lcm status`
+  returned `{}`) and its artifacts became unreachable orphans.
+
+Why it matters:
+  A timed-out handler silently forfeits the whole run — no LCM result, no
+  status, no preserve data — and wastes the provider-native work already done.
+
+Required closure:
+  Bound the entire handler by one absolute wall-clock deadline (config
+  `handlerDeadlineMs`, max 27 s < 30 s) measured from handler start, and
+  degrade gracefully (deterministic fallbacks, native replay skipped, status
+  persisted) instead of letting aborts escape to the harness wall.
+
+Status (2026-08-01): CLOSED — `beforeCompact` now creates a prelude deadline
+  (4 s) racing config loading (defaults on expiry) and an absolute total
+  deadline from handler start; `total.signal` is wired into the API-key
+  preflight, capture, orphan accounting, tier resolution, root model calls,
+  the native replay call (with a `raceWithSignal` guarantee for
+  signal-ignoring callees), and snapcompact rendering. Tier resolution and the
+  DAG write loop treat internal expiry as degradation, not cancellation:
+  tier lookups fall back to the active model and the write loop checks only
+  user cancellation. Deadline aborts persist status and return
+  `{ cancel: true }` quickly instead of reaching OMP's 30 s wall. Regression
+  tests in test/controller.test.ts (never-settling native replay; hanging
+  config loader) fail on the pre-closure code and pass post-closure; the live
+  integration suite still completes with model-quality summaries and native
+  replay preserved.
+
 Ranking notes
 -------------
 
