@@ -32,10 +32,24 @@ export interface ResolvedSummaryModel {
   label: string;
 }
 
+export interface TierCandidateObservation {
+  role: SummaryModelTier;
+  label: string; // "provider/id", or "(none)" when no candidate model exists
+  ok: boolean;
+  reason:
+    | "no-candidate"
+    | "not-text"
+    | "context-too-small"
+    | "no-key"
+    | "ok";
+}
+
 export interface ResolveTierOptions {
   signal?: AbortSignal;
   activeModel?: unknown; // ctx.model; required for the "active" tier
   minContextWindow?: number; // models with a smaller contextWindow are ineligible
+  /** Called once per chain step with the candidate verdict (diagnostics). */
+  onCandidate?: (observation: TierCandidateObservation) => void;
 }
 
 export const TIER_CHAINS: Record<"leaf" | "root", readonly SummaryModelTier[]> =
@@ -114,24 +128,43 @@ export async function resolveSummaryModel(
   deps: TierResolverDeps,
   options: ResolveTierOptions = {},
 ): Promise<ResolvedSummaryModel | undefined> {
+  const emit = (role: SummaryModelTier, observation: Omit<TierCandidateObservation, "role">) => {
+    options.onCandidate?.({ role, ...observation });
+  };
   for (const role of chain) {
     let candidate: unknown;
     if (role === "active") {
       candidate = options.activeModel;
-      if (!candidate) continue;
+      if (!candidate) {
+        emit(role, { label: "(none)", ok: false, reason: "no-candidate" });
+        continue;
+      }
     } else {
       const resolve = deps.models?.resolve;
-      if (!resolve) continue;
+      if (!resolve) {
+        emit(role, { label: "(none)", ok: false, reason: "no-candidate" });
+        continue;
+      }
       // The @ prefix is REQUIRED: getModelRoleAlias only recognizes prefixed
       // aliases; a bare role name would be treated as a literal model id.
       candidate = resolve(`@${role}`);
-      if (!candidate) continue;
+      if (!candidate) {
+        emit(role, { label: "(none)", ok: false, reason: "no-candidate" });
+        continue;
+      }
     }
 
     // Candidate must be an object and text-capable.
-    if (typeof candidate !== "object" || candidate === null) continue;
+    if (typeof candidate !== "object" || candidate === null) {
+      emit(role, { label: "(none)", ok: false, reason: "no-candidate" });
+      continue;
+    }
     const shape = candidateModelShape(candidate);
-    if (!shape.textCapable) continue;
+    const label = `${shape.provider ?? "unknown"}/${shape.id ?? "unknown"}`;
+    if (!shape.textCapable) {
+      emit(role, { label, ok: false, reason: "not-text" });
+      continue;
+    }
 
     // A finite positive contextWindow must satisfy the minimum, when provided.
     if (
@@ -139,6 +172,7 @@ export async function resolveSummaryModel(
       shape.contextWindow !== undefined &&
       shape.contextWindow < options.minContextWindow
     ) {
+      emit(role, { label, ok: false, reason: "context-too-small" });
       continue;
     }
 
@@ -150,20 +184,21 @@ export async function resolveSummaryModel(
         signal: options.signal,
       },
     );
-    if (!apiKey) continue;
+    if (!apiKey) {
+      emit(role, { label, ok: false, reason: "no-key" });
+      continue;
+    }
 
-    const provider = shape.provider ?? "unknown";
-    const id = shape.id ?? "unknown";
-    const label = `${provider}/${id}`;
     const model: TierModelInfo = {
       model: candidate,
-      provider,
-      id,
+      provider: shape.provider ?? "unknown",
+      id: shape.id ?? "unknown",
       label,
       ...(shape.contextWindow !== undefined
         ? { contextWindow: shape.contextWindow }
         : {}),
     };
+    emit(role, { label, ok: true, reason: "ok" });
     return { role, model, apiKey, label };
   }
   return undefined;

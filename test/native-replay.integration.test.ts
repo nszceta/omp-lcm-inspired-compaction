@@ -500,4 +500,26 @@ describe("live provider-native replay integration", () => {
     },
     300_000,
   );
+
+  liveTest(
+    "produces model leaf/root summaries (not deterministic fallback) on Spark",
+    async () => {
+      const { session, status } = await createLiveLcmSession(SPARK);
+      try {
+        await addTurnAndCompact(session, status, "SPARK_MODEL_SUMMARY");
+        // GAP-006 closure: the leaf/root calls go through the registry's
+        // auth-retry resolver, so a stale OAuth bearer is refreshed instead
+        // of degrading every summary to the deterministic fallback.
+        expect(status.lastSummaryQuality).toBe("model");
+        expect(status.lastCompletedModelSummaryCount).toBeGreaterThan(0);
+        expect(status.lastDeterministicFallbackCount).toBe(0);
+        expect(status.lastLeafModelError).toBeUndefined();
+        expect(status.lastRootModelError).toBeUndefined();
+        expect(status.lastNativeReplayStatus).toBe("preserved");
+      } finally {
+        await session.dispose();
+      }
+    },
+    300_000,
+  );
 });

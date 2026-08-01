@@ -161,7 +161,7 @@ reports unreadable raw artifacts as `(missing)` instead of silently skipping
 them. README now documents `lcm_describe`, `lcm_grep`, and the OMP
 artifact-spill dependency.
 
-## Known accepted limitations recorded in this pass
+## Known accepted limitations (Part II/III, retained)
 
 - `lcm_grep` patterns are agent-supplied tool arguments (semi-trusted,
   grep-tool norm); catastrophic-backtracking regexes are the caller's
@@ -169,3 +169,90 @@ artifact-spill dependency.
 - The live opt-in smoke (real OMP `/compact` against configured credentials)
   remains environment-gated; the deterministic wall-clock regression is the
   authoritative fallback evidence for the 30-second budget claim.
+
+# Verification log — Part IV (2026-08-01): credential-path fix, live-verified
+
+Package: `omp-lcm-inspired-compaction` 0.2.1 (deps pinned to OMP 17.2.3)
+
+## Defects closed
+
+1. **GAP-006 (credential refresh/authenticated retry).** Leaf/root summary
+   calls previously handed `complete()` a one-shot `getApiKey` snapshot; a
+   stale OAuth bearer failed fast with no refresh, and the error was swallowed
+   into the deterministic fallback. Now every summary call runs through
+   `withAuth(keySource, attempt)` where `keySource` is
+   `modelRegistry.resolver(model, sessionId)` (storage-level `resolver` and a
+   refresh-aware `getApiKey` wrapper are degraded fallbacks), seeded with the
+   tier snapshot via `seedApiKeyResolver`. 401 → force-refresh same account;
+   403/usage-limit → sibling rotation; last error recorded in
+   `lastLeafModelError`/`lastRootModelError`.
+2. **GAP-032 (tier wrapper passed as the model).** `resolveSummaryModel`
+   returns a `TierModelInfo` wrapper; the controller passed the wrapper to
+   `complete()`, so every tier-resolved call died with `Unhandled API:
+   undefined` before any HTTP request — the actual cause of the 2026-07-28 and
+   2026-08-01 smoke failures, invisible because errors were swallowed.
+   Controller now unwraps (`leafModel.model.model`); regression test asserts
+   the fake completion receives the candidate including its `api` field.
+3. **GAP-029 (17.1.8 coupling).** All `@oh-my-pi/*` pins moved to 17.2.3;
+   suite and live harness run against 17.2.3; the auth-retry APIs used exist
+   in both 17.1.8 and 17.2.3.
+4. **Error observability.** `lastLeafModelError`, `lastRootModelError`, and
+   `lastTierRejections` (`stage:role:label:reason`, capped at 8) surface the
+   swallowed failure text; cleared on each run start.
+
+## Full tests and static checks (final state)
+
+```text
+$ bun test
+195 pass
+3 skip (live integration, gated on LCM_LIVE_INTEGRATION=1)
+0 fail
+Ran 198 tests across 21 files.
+$ bun run typecheck
+tsc --noEmit: clean
+```
+
+New test file: `test/credential-path.test.ts` (7) — seeded-resolver refresh,
+bare-registry force-refresh wrapper, exhausted-auth recording + clearing,
+non-auth no-retry, missing-key, tier rejections, and the GAP-032 unwrap
+regression.
+
+`bun run check` reports only pre-existing `noExplicitAny` diagnostics in
+files untouched by this work (`src/index.ts`, `test/helpers.ts` and siblings;
+biome 2.5.6 with the recommended preset); changed files (`src/controller.ts`,
+`src/tiers.ts`, `test/credential-path.test.ts`) are clean.
+
+## Live verification — real codex Spark subscription (OMP 17.2.3)
+
+`LCM_LIVE_INTEGRATION=1 bun test test/native-replay.integration.test.ts`
+(2026-08-01, real `openai-codex/gpt-5.3-codex-spark` OAuth credentials,
+`compaction.keepRecentTokens: 1` minimal-context rounds):
+
+```text
+5 pass
+0 fail
+34 expect() calls
+Ran 5 tests across 1 file. [35.92s]
+```
+
+New live test `produces model leaf/root summaries (not deterministic
+fallback) on Spark` asserts, after a real compaction:
+
+- `lastSummaryQuality: "model"` (was `"deterministic-fallback"` in all 3
+  pre-fix smoke rounds);
+- `lastCompletedModelSummaryCount > 0` and
+  `lastDeterministicFallbackCount === 0`;
+- `lastLeafModelError` / `lastRootModelError` undefined;
+- `lastNativeReplayStatus: "preserved"` (replay unaffected).
+
+Existing live replay-lineage tests still pass: Spark→Luna lineage switch,
+encrypted V2 replacement history, generation chaining with
+`lastNativeReplaySeeded: true`.
+
+## Known accepted limitations recorded in this pass
+
+- Tier resolution remains availability-gated on a `getApiKey` snapshot; the
+  call itself refreshes through the resolver, and per-candidate rejections are
+  now recorded in status (`lastTierRejections`).
+- The repo-wide biome `check` failure (legacy `any` sites) predates this
+  work and is left as debt; changed files are clean.

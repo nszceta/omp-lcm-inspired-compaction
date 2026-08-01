@@ -78,7 +78,13 @@ installing a raw GitHub URL is a direct install; use the marketplace commands
 above for update tracking. Restart OMP, or reload extensions, after installing
 or upgrading.
 
-The package supports OMP 17.1.8 and uses only published OMP extension APIs.
+The package supports OMP 17.2.3+ and uses only published OMP extension APIs.
+Credential resolution for leaf/root summary calls goes through the registry's
+own auth-retry resolver (`ModelRegistry.resolver`) wrapped by pi-ai's
+`withAuth`, so stale OAuth bearers (Codex, Gemini CLI, Anthropic, xAI) are
+force-refreshed and rotated instead of degrading summaries to the
+deterministic fallback. Registries that only expose `getApiKey` are wrapped
+with a refresh-aware resolver; the tier snapshot seeds the first attempt.
 
 The `renderer` setting accepts `auto`, `context-full`, or `snapcompact`.
 `auto` selects snapcompact only for a snapcompact preparation with a

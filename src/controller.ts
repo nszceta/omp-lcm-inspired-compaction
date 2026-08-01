@@ -14,7 +14,13 @@ import {
   shouldUseOpenAiRemoteCompaction,
   withOpenAiRemoteCompactionPreserveData,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import { complete as completeModel } from "@oh-my-pi/pi-ai";
+import {
+  complete as completeModel,
+  seedApiKeyResolver,
+  withAuth,
+  type ApiKey,
+  type ApiKeyResolver,
+} from "@oh-my-pi/pi-ai";
 import { planSummaryBatches, type SummaryBatch } from "./batch.ts";
 import { type LcmConfig, type Renderer, readConfig } from "./config.ts";
 import { parseLcmPreserveState } from "./contracts.ts";
@@ -51,6 +57,7 @@ import {
   resolveSummaryModel,
   SUMMARY_RESERVE_TOKENS,
   TIER_CHAINS,
+  type TierCandidateObservation,
   type TierResolverDeps,
 } from "./tiers.ts";
 
@@ -99,6 +106,9 @@ export interface LcmRuntimeStatus {
   lastCompletedModelSummaryCount?: number;
   lastDeadlineFallbackCount?: number;
   lastDeadlineStage?: "leaf" | "root" | "native-replay" | "total";
+  lastLeafModelError?: string;
+  lastRootModelError?: string;
+  lastTierRejections?: string[];
   lastError?: string;
 }
 export interface LcmController {
@@ -113,7 +123,7 @@ export type CompletionCall = (
     messages: Array<{ role: "user"; content: string; timestamp: number }>;
   },
   options: {
-    apiKey: string | undefined;
+    apiKey: ApiKey | undefined;
     maxTokens: number;
     signal: AbortSignal;
   },
@@ -134,6 +144,83 @@ export interface ControllerDeps {
   getPluginSettings?: (name: string, cwd?: string) => unknown;
   config?: Partial<LcmConfig>; // merged over readConfig (test seam; bypasses bounds)
   resolveTier?: typeof resolveSummaryModel; // default: the real resolver from ./tiers.ts
+}
+
+/**
+ * Structural slice of the OMP model registry the credential resolver needs.
+ * The real host registry (ModelRegistry) exposes `resolver(model, sessionId)`
+ * implementing the central a/b/c auth-retry policy; older or fake registries
+ * degrade to a refresh-aware `getApiKey` wrapper.
+ */
+interface RegistryKeySource {
+  resolver?: (model: unknown, sessionId?: string) => ApiKeyResolver;
+  authStorage?: {
+    resolver?: (
+      provider: string,
+      options?: { sessionId?: string; baseUrl?: string; modelId?: string },
+    ) => ApiKeyResolver;
+  };
+  getApiKey?: (
+    model: unknown,
+    sessionId?: string,
+    options?: { forceRefresh?: boolean; signal?: AbortSignal },
+  ) => Promise<string | undefined>;
+}
+
+/**
+ * Build the credential source for summary model calls, preferring the host's
+ * own auth-retry policy (initial resolve, force-refresh on 401, sibling
+ * rotation on 403/usage-limit) and degrading to a refresh-aware getApiKey
+ * wrapper for registries that only expose key snapshots.
+ */
+function registryApiKeyResolver(
+  registry: RegistryKeySource | undefined,
+  model: unknown,
+  sessionId: string | undefined,
+): ApiKeyResolver | undefined {
+  if (typeof registry?.resolver === "function") {
+    return registry.resolver(model, sessionId) as ApiKeyResolver;
+  }
+  const storage = registry?.authStorage;
+  if (typeof storage?.resolver === "function") {
+    const candidate = model as {
+      provider?: string;
+      baseUrl?: string;
+      id?: string;
+    };
+    return storage.resolver(candidate.provider ?? "unknown", {
+      sessionId,
+      baseUrl: candidate.baseUrl,
+      modelId: candidate.id,
+    });
+  }
+  if (typeof registry?.getApiKey === "function") {
+    const getApiKey = registry.getApiKey;
+    const getKey = (options: {
+      forceRefresh?: boolean;
+      signal?: AbortSignal;
+    }) => getApiKey(model, sessionId, options);
+    return async (ctx) => {
+      // No rotation primitive on a bare registry: force-refresh on any auth
+      // failure so a stale OAuth bearer is re-minted instead of replayed.
+      return getKey({
+        forceRefresh: ctx.error !== undefined,
+        signal: ctx.signal,
+      });
+    };
+  }
+  return undefined;
+}
+
+function recordModelCallError(
+  status: LcmRuntimeStatus,
+  stage: "leaf" | "root",
+  error: unknown,
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const truncated = message.slice(0, 300);
+  if (stage === "leaf") status.lastLeafModelError = truncated;
+  else status.lastRootModelError = truncated;
 }
 
 function completionText(response: unknown): string {
@@ -378,6 +465,9 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       delete status.lastError;
       delete status.lastDeadlineStage;
       delete status.lastDeadlineFallbackCount;
+      delete status.lastLeafModelError;
+      delete status.lastRootModelError;
+      delete status.lastTierRejections;
       const startedAt = Date.now();
       if (!event?.preparation)
         throw new Error("Missing compaction preparation");
@@ -431,10 +521,27 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         signal: event.signal,
       });
       const makeModelCall =
-        (model: any, apiKey: string | undefined): SummaryCall =>
+        (
+          model: unknown,
+          apiKey: string | undefined,
+          stage: "leaf" | "root",
+        ): SummaryCall =>
         async (request: SummaryModelRequest) => {
-          const key =
-            apiKey ?? (await ctx.modelRegistry?.getApiKey?.(ctx.model));
+          const sessionId = ctx.sessionManager?.getSessionId?.();
+          const registryResolver = registryApiKeyResolver(
+            ctx.modelRegistry,
+            model,
+            sessionId,
+          );
+          // A tier snapshot seeds the first attempt; any auth failure falls
+          // back to the registry's refresh/rotation policy instead of failing
+          // the call (GAP-006 closure).
+          const keySource: ApiKey | undefined =
+            apiKey === undefined || apiKey === ""
+              ? (registryResolver ?? undefined)
+              : registryResolver
+                ? seedApiKeyResolver(apiKey, registryResolver)
+                : apiKey;
           const completionContext = {
             systemPrompt: [request.prompt],
             messages: [
@@ -445,18 +552,36 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
               },
             ],
           };
-          const completionOptions = {
-            apiKey: key,
-            maxTokens: request.targetTokens,
-            signal: request.signal,
-          };
-          const response = deps.complete
-            ? await deps.complete(model, completionContext, completionOptions)
-            : await completeModel(model, completionContext, completionOptions);
-          return completionText(response);
+          const attempt = (key: string) =>
+            deps.complete !== undefined
+              ? deps.complete(model, completionContext, {
+                  apiKey: key,
+                  maxTokens: request.targetTokens,
+                  signal: request.signal,
+                })
+              : // OMP Model objects are structurally compatible with pi-ai's
+                // Model type; the registry hands us the session's model.
+                completeModel(
+                  model as Parameters<typeof completeModel>[0],
+                  completionContext,
+                  {
+                    apiKey: key,
+                    maxTokens: request.targetTokens,
+                    signal: request.signal,
+                  },
+                );
+          try {
+            const response = await withAuth(keySource, attempt, {
+              signal: request.signal,
+            });
+            return completionText(response);
+          } catch (error) {
+            recordModelCallError(status, stage, error);
+            throw error;
+          }
         };
       const call: SummaryCall =
-        deps.summaryCall ?? makeModelCall(ctx.model, undefined);
+        deps.summaryCall ?? makeModelCall(ctx.model, undefined, "leaf");
       let deterministicFallbackCount = 0;
       let deadlineFallbackCount = 0;
       let completedModelSummaryCount = 0;
@@ -475,6 +600,15 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         modelRegistry: ctx.modelRegistry,
         sessionId: ctx.sessionManager?.getSessionId?.(),
       };
+      const tierRejections: string[] = [];
+      const observeTier =
+        (stage: "leaf" | "root") =>
+        (observation: TierCandidateObservation) => {
+          if (!observation.ok)
+            tierRejections.push(
+              `${stage}:${observation.role}:${observation.label}:${observation.reason}`,
+            );
+        };
       let leafModel: ResolvedSummaryModel | undefined;
       if (tiersActive) {
         leafModel = await resolveTier(
@@ -484,6 +618,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
             signal: event.signal,
             activeModel: ctx.model,
             minContextWindow: SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
+            onCandidate: observeTier("leaf"),
           },
         );
         status.lastLeafSummaryModel = leafModel?.label;
@@ -502,7 +637,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       const leafCall: SummaryCall =
         leafModel === undefined
           ? call
-          : makeModelCall(leafModel.model, leafModel.apiKey);
+          : makeModelCall(leafModel.model.model, leafModel.apiKey, "leaf");
       const leafWorker = async (
         batch: SummaryBatch,
       ): Promise<SummaryResult> => {
@@ -574,14 +709,18 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
             signal: event.signal,
             activeModel: ctx.model,
             minContextWindow: SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
+            onCandidate: observeTier("root"),
           },
         );
         status.lastRootSummaryModel = rootModel?.label;
       }
+      status.lastTierRejections = tierRejections.slice(0, 8);
       const rootCall: SummaryCall =
         rootModel === undefined
-          ? leafCall
-          : makeModelCall(rootModel.model, rootModel.apiKey);
+          ? deps.summaryCall !== undefined
+            ? leafCall // injected seam serves both stages
+            : makeModelCall(ctx.model, undefined, "root")
+          : makeModelCall(rootModel.model.model, rootModel.apiKey, "root");
       const runRootSummary = async (
         request: SummaryRequest,
       ): Promise<SummaryResult> => {

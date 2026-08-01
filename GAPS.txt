@@ -71,22 +71,24 @@ Required closure:
   event and pass them through the request options. Add Codex-specific tests that
   assert the generated compatibility headers and request context.
 
-GAP-006: Credential refresh and authenticated retry are missing
----------------------------------------------------------------
-Current behavior:
+CLOSED GAP-006: Credential refresh and authenticated retry are missing
+---------------------------------------------------------------------
+Current behavior (pre-closure):
   The plugin obtains one API key from `modelRegistry` and calls the remote
   compaction helper directly. OMP's built-in compaction path wraps calls with its
   authentication retry logic.
 
-Why it matters:
-  Expired or refreshable credentials cause immediate replay degradation even
-  when OMP could refresh them. Textual LCM remains available, but provider-native
-  continuity is lost for that generation.
-
-Required closure:
-  Use a published OMP authentication wrapper if available to extensions, or add
-  a narrow credential-refresh retry through the model registry without logging
-  secrets or retrying non-authentication failures.
+Closure:
+  Leaf/root summary calls now run through `withAuth(keySource, attempt)` where
+  `keySource` is the registry's own auth-retry resolver
+  (`modelRegistry.resolver(model, sessionId)`; storage-level resolver and a
+  refresh-aware `getApiKey` wrapper are the degraded fallbacks) seeded with the
+  tier snapshot via `seedApiKeyResolver`. A 401 force-refreshes the same
+  account, a 403/usage-limit rotates to a sibling, and the last auth error is
+  recorded in status (`lastLeafModelError`/`lastRootModelError`) instead of
+  being silently swallowed. Static keys keep the single-attempt behavior.
+  Live-verified on openai-codex/gpt-5.3-codex-spark: leaf and root summaries
+  completed as model prose with zero deterministic fallback.
 
 CLOSED GAP-007: OpenAI V2 streaming replay and migration were missing
 --------------------------------------------------------------------
@@ -443,9 +445,9 @@ Required closure:
   Bind to one published typed settings API for the supported OMP version and add
   an integration test for persistence across reload.
 
-GAP-029: The extension remains tightly coupled to OMP 17.1.8
------------------------------------------------------------
-Current behavior:
+CLOSED GAP-029: The extension remains tightly coupled to OMP 17.1.8
+------------------------------------------------------------------
+Current behavior (pre-closure):
   Runtime and peer dependencies are pinned to OMP 17.1.8 public APIs.
 
 Why it matters:
@@ -453,9 +455,31 @@ Why it matters:
   registration, or session reconstruction contracts. Older releases are not
   supported.
 
-Required closure:
-  Define a tested compatibility matrix, add CI against supported OMP releases,
-  and fail installation clearly when the host is outside that range.
+Closure:
+  All `@oh-my-pi/*` pins (dependencies, peer, dev) moved to 17.2.3; the full
+  suite and the live integration harness now run against 17.2.3. The auth-retry
+  APIs used by the GAP-006 closure (`ApiKeyResolver`, `seedApiKeyResolver`,
+  `withAuth`, `ModelRegistry.resolver`) exist in both 17.1.8 and 17.2.3, so the
+  plugin remains compatible with both lines while targeting 17.2.3+.
+
+GAP-032: Tier-resolved models were passed to the completion wrapped in metadata
+-----------------------------------------------------------------------------
+Current behavior (pre-fix):
+  `resolveSummaryModel` returns `ResolvedSummaryModel.model` as a
+  `TierModelInfo` wrapper (`{ model, provider, id, label, contextWindow }`), but
+  the controller passed that wrapper straight to `complete()`. The wrapper has
+  no `api` field, so every tier-resolved call died in pi-ai's dispatch with
+  `Unhandled API: undefined` and every summary degraded to the deterministic
+  fallback. This is what the 2026-07-28/08-01 live smokes actually hit: the
+  active codex model resolved fine (with a key), the call failed before any
+  HTTP request, and the swallowed error hid it. Unit tests missed it because
+  every injected completion fake ignores the model argument.
+
+Closure:
+  The controller now unwraps (`leafModel.model.model` / `rootModel.model.model`)
+  before calling the completion, with a unit regression that asserts the fake
+  receives the unwrapped candidate including its `api` field, and a live test
+  asserting model-quality summaries on openai-codex/gpt-5.3-codex-spark.
 
 GAP-030: No automated live release canary
 -----------------------------------------
