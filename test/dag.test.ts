@@ -115,6 +115,23 @@ describe("immutable DAG", () => {
     expect(result.roots[0]?.level).toBe(9);
     expect(store.saved).toHaveLength(0);
   });
+  test("builds a DAG from zero-based raw artifact ids", async () => {
+    const store = artifactStore(0);
+    const result = await buildDag({
+      store,
+      generation: 1,
+      leaves: [
+        { summary: "s0", rawArtifactIds: ["0"], sourceEntryIds: ["e0"] },
+      ],
+    });
+    expect(result.roots).toHaveLength(1);
+    // No raw write happens (rawArtifactIds supplied), so the leaf node is the
+    // first save and gets the store's zero-based id "0".
+    expect(result.roots[0]?.artifactId).toBe("0");
+    expect(store.saved).toHaveLength(1);
+    const node = JSON.parse(store.saved[0]?.content ?? "{}");
+    expect(node.rawSources).toEqual(["0"]);
+  });
   test("failed IDs cannot become roots", async () => {
     const store = { saveArtifact: () => "bad" };
     await expect(

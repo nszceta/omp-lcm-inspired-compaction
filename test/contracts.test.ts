@@ -35,7 +35,14 @@ describe("contracts", () => {
       }),
     ).toBeUndefined();
     expect(isNumericArtifactId("01")).toBe(false);
-    expect(isNumericArtifactId("0")).toBe(false);
+    expect(isNumericArtifactId("00")).toBe(false);
+    expect(isNumericArtifactId("-0")).toBe(false);
+  });
+  test("accepts zero as a numeric artifact id (real OMP stores are 0-based)", () => {
+    expect(isNumericArtifactId("0")).toBe(true);
+    expect(formatArtifactUri("0")).toBe("artifact://0");
+    expect(isNumericArtifactId("00")).toBe(false);
+    expect(isNumericArtifactId("-1")).toBe(false);
   });
   test("formats stable roots and links", () => {
     const roots: any[] = [

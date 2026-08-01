@@ -56,7 +56,7 @@ export interface DagOptions {
 }
 const numeric = (id: string) =>
   typeof id === "string" &&
-  /^[1-9]\d*$/.test(id) &&
+  /^(0|[1-9]\d*)$/.test(id) &&
   Number.isSafeInteger(Number(id));
 const checkId = (id: string) => {
   if (!numeric(id)) throw new Error(`Invalid artifact id: ${id}`);
@@ -68,7 +68,7 @@ const checkAbort = (s?: AbortSignal) => {
 const defaultTokens = (s: string) => Math.ceil(s.length / 4);
 function validateRoot(root: LcmRootRef): LcmRootRef {
   if (
-    !/^[1-9]\d*$/.test(root.artifactId) ||
+    !/^(0|[1-9]\d*)$/.test(root.artifactId) ||
     !Number.isSafeInteger(Number(root.artifactId))
   ) {
     throw new Error(`Invalid prior root artifact id: ${root.artifactId}`);

@@ -169,4 +169,29 @@ describe("controller", () => {
     );
     expect(result).not.toBeUndefined();
   });
+  test("accepts zero-based artifact ids from a real OMP session store", async () => {
+    // Real OMP artifact stores are 0-indexed (first artifact id "0").
+    const c = ctx();
+    c.sessionManager = artifactStore(0);
+    const controller = createController(c, {
+      summaryCall: async () => "summary",
+    });
+    const result = await controller.beforeCompact(
+      event(preparation("keep", { messagesToSummarize: ["discarded"] }), [
+        entry("old"),
+        entry("keep"),
+      ]),
+    );
+    expect(result.compaction).toBeDefined();
+    expect(controller.status.lastOutcome).toBe("success");
+    const raw = c.sessionManager.saved.find(
+      (artifact) => artifact.toolType === "lcm-raw",
+    );
+    const node = c.sessionManager.saved.find(
+      (artifact) => artifact.toolType === "lcm-node",
+    );
+    expect(raw?.id).toBe("0");
+    expect(node?.id).toBe("1");
+    expect(JSON.parse(node?.content ?? "{}").rawSources).toEqual(["0"]);
+  });
 });

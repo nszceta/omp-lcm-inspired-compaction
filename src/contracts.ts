@@ -55,13 +55,14 @@ function isSafeLevel(value: unknown): value is number {
   );
 }
 
-/** Session artifact IDs are decimal, positive, canonical numeric strings. */
+/** Session artifact IDs are decimal, canonical numeric strings (0-based in real OMP sessions). */
 export function isNumericArtifactId(value: unknown): value is string {
-  if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) return false;
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value))
+    return false;
   const number = Number(value);
   return (
     Number.isSafeInteger(number) &&
-    number >= 1 &&
+    number >= 0 &&
     number <= Number.MAX_SAFE_INTEGER
   );
 }
