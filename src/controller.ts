@@ -15,9 +15,12 @@ import {
   withOpenAiRemoteCompactionPreserveData,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import { complete as completeModel } from "@oh-my-pi/pi-ai";
-import { type Renderer, readConfig } from "./config.ts";
+import { planSummaryBatches, type SummaryBatch } from "./batch.ts";
+import { type LcmConfig, type Renderer, readConfig } from "./config.ts";
 import { parseLcmPreserveState } from "./contracts.ts";
 import { buildDag } from "./dag.ts";
+import { Deadline } from "./deadline.ts";
+import { runBoundedPool } from "./pool.ts";
 import { renderContextFull } from "./render-context-full.ts";
 import {
   NonVisionModelError,
@@ -32,14 +35,24 @@ import {
   type ReplayModel,
   replayCredentialIdentity,
 } from "./replay-lineage.ts";
-import { captureRawSource, serializeSummaryEntries } from "./source.ts";
+import { captureRawSource } from "./source.ts";
 import type {
   SummaryCall,
   SummaryModelRequest,
   SummaryRequest,
   SummaryResult,
 } from "./summarize.ts";
-import { summarizeText } from "./summarize.ts";
+import { deterministicSummary, summarizeText } from "./summarize.ts";
+import {
+  batchBudgetFor,
+  MIN_VIABLE_BATCH_TOKENS,
+  preferredChain,
+  type ResolvedSummaryModel,
+  resolveSummaryModel,
+  SUMMARY_RESERVE_TOKENS,
+  TIER_CHAINS,
+  type TierResolverDeps,
+} from "./tiers.ts";
 
 type RequestNativeCompaction =
   typeof import("@oh-my-pi/pi-agent-core/compaction").requestOpenAiRemoteCompaction;
@@ -62,7 +75,7 @@ export interface LcmRuntimeStatus {
   lastPreserveKeys?: string[];
   lastSnapcompactFrameCount?: number;
   builtInRemoteContextFullIntercepted?: boolean;
-  lastOutcome?: "success" | "cancelled";
+  lastOutcome?: "running" | "success" | "cancelled";
   lastSummaryQuality?: "model" | "deterministic-fallback";
   lastDeterministicFallbackCount?: number;
   lastNativeReplayStatus?:
@@ -76,6 +89,16 @@ export interface LcmRuntimeStatus {
   lastNativeReplayItemCount?: number;
   lastNativeReplaySeeded?: boolean;
   lastNativeReplayError?: string;
+  lastStartedAt?: string;
+  lastElapsedMs?: number;
+  lastLeafSummaryModel?: string;
+  lastRootSummaryModel?: string;
+  lastRawChunkCount?: number;
+  lastSummaryBatchCount?: number;
+  lastSummaryConcurrency?: number;
+  lastCompletedModelSummaryCount?: number;
+  lastDeadlineFallbackCount?: number;
+  lastDeadlineStage?: "leaf" | "root" | "native-replay" | "total";
   lastError?: string;
 }
 export interface LcmController {
@@ -109,6 +132,8 @@ export interface ControllerDeps {
   log?: (message: string) => void;
   status?: LcmRuntimeStatus;
   getPluginSettings?: (name: string, cwd?: string) => unknown;
+  config?: Partial<LcmConfig>; // merged over readConfig (test seam; bypasses bounds)
+  resolveTier?: typeof resolveSummaryModel; // default: the real resolver from ./tiers.ts
 }
 
 function completionText(response: unknown): string {
@@ -345,12 +370,22 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
     status: injected.status ?? {},
   };
   const status: LcmRuntimeStatus = deps.status ?? {};
+  const resolveTier = injected.resolveTier ?? resolveSummaryModel;
   const beforeCompact = async (event: any): Promise<any> => {
     try {
+      status.lastOutcome = "running";
+      status.lastStartedAt = new Date().toISOString();
+      delete status.lastError;
+      delete status.lastDeadlineStage;
+      delete status.lastDeadlineFallbackCount;
+      const startedAt = Date.now();
       if (!event?.preparation)
         throw new Error("Missing compaction preparation");
       if (!ctx?.model) throw new Error("No active model");
-      const config = await readConfig(ctx, injected as any);
+      const config: LcmConfig = {
+        ...(await readConfig(ctx, injected as any)),
+        ...injected.config,
+      };
       const settings = event.preparation.settings ?? {};
       if (
         !injected.summaryCall &&
@@ -380,13 +415,26 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         (content, toolType) => manager.saveArtifact(content, toolType),
         { contextWindow: ctx.model?.contextWindow },
       );
+      status.lastRawChunkCount = capture.chunks.length;
       const prior = parseLcmPreserveState(
         event.preparation.previousPreserveData?.ompLcmArtifactsV1,
       );
-      const call: SummaryCall =
-        deps.summaryCall ??
-        (async (request: SummaryModelRequest) => {
-          const key = await ctx.modelRegistry?.getApiKey?.(ctx.model);
+      const total = new Deadline(config.handlerDeadlineMs, {
+        signal: event.signal,
+      });
+      const leafStageMs = Math.floor((config.handlerDeadlineMs * 14) / 24);
+      const replayRenderMs = Math.floor((config.handlerDeadlineMs * 4) / 24);
+      const leafDeadline = new Deadline(leafStageMs, {
+        signal: event.signal,
+      });
+      const rootDeadline = Deadline.at(total.deadlineAt - replayRenderMs, {
+        signal: event.signal,
+      });
+      const makeModelCall =
+        (model: any, apiKey: string | undefined): SummaryCall =>
+        async (request: SummaryModelRequest) => {
+          const key =
+            apiKey ?? (await ctx.modelRegistry?.getApiKey?.(ctx.model));
           const completionContext = {
             systemPrompt: [request.prompt],
             messages: [
@@ -403,48 +451,152 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
             signal: request.signal,
           };
           const response = deps.complete
-            ? await deps.complete(
-                ctx.model,
-                completionContext,
-                completionOptions,
-              )
-            : await completeModel(
-                ctx.model,
-                completionContext,
-                completionOptions,
-              );
+            ? await deps.complete(model, completionContext, completionOptions)
+            : await completeModel(model, completionContext, completionOptions);
           return completionText(response);
-        });
+        };
+      const call: SummaryCall =
+        deps.summaryCall ?? makeModelCall(ctx.model, undefined);
       let deterministicFallbackCount = 0;
+      let deadlineFallbackCount = 0;
+      let completedModelSummaryCount = 0;
       const summarize = deps.summarize ?? summarizeText;
       const runSummary = async (
         request: SummaryRequest,
+        modelCall: SummaryCall,
       ): Promise<SummaryResult> => {
-        const summary = await summarize(request, call);
+        const summary = await summarize(request, modelCall);
         if (summary.level === "deterministic") deterministicFallbackCount++;
         return summary;
       };
-      const chunks = capture.chunks;
-      const leaves = [];
-      for (const chunk of chunks) {
-        const result = await runSummary({
-          input: serializeSummaryEntries(chunk.entries),
-          targetTokens: 2048,
-          signal: event.signal,
-        });
+      const tiersActive = !injected.summaryCall;
+      const tierDeps: TierResolverDeps = {
+        models: ctx.models,
+        modelRegistry: ctx.modelRegistry,
+        sessionId: ctx.sessionManager?.getSessionId?.(),
+      };
+      let leafModel: ResolvedSummaryModel | undefined;
+      if (tiersActive) {
+        leafModel = await resolveTier(
+          preferredChain(config.leafSummaryModel, TIER_CHAINS.leaf),
+          tierDeps,
+          {
+            signal: event.signal,
+            activeModel: ctx.model,
+            minContextWindow: SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
+          },
+        );
+        status.lastLeafSummaryModel = leafModel?.label;
+      }
+      status.lastSummaryConcurrency = config.summaryConcurrency;
+      const leafBudget = batchBudgetFor(
+        config.summaryBatchInputTokens,
+        leafModel?.model.contextWindow,
+      );
+      const batches = planSummaryBatches(
+        capture.chunks,
+        capture.rawArtifactIds,
+        { maxInputTokens: leafBudget, signal: event.signal },
+      );
+      status.lastSummaryBatchCount = batches.length;
+      const leafCall: SummaryCall =
+        leafModel === undefined
+          ? call
+          : makeModelCall(leafModel.model, leafModel.apiKey);
+      const leafWorker = async (
+        batch: SummaryBatch,
+      ): Promise<SummaryResult> => {
+        if (batch.oversized) {
+          deterministicFallbackCount++;
+          return deterministicSummary(batch.input, 2048);
+        }
+        const perCall = new Deadline(
+          Math.min(9_000, leafDeadline.remainingMs()),
+          { signal: leafDeadline.signal },
+        );
+        try {
+          return await runSummary(
+            {
+              input: batch.input,
+              targetTokens: 2048,
+              signal: perCall.signal,
+            },
+            leafCall,
+          );
+        } catch (error) {
+          if (event.signal?.aborted) throw error;
+          if (perCall.expired() || leafDeadline.expired()) {
+            deadlineFallbackCount++;
+            status.lastDeadlineStage ??= "leaf";
+            return deterministicSummary(batch.input, 2048);
+          }
+          throw error;
+        }
+      };
+      const outcomes = await runBoundedPool(
+        batches,
+        config.summaryConcurrency,
+        leafWorker,
+        { signal: leafDeadline.signal },
+      );
+      const leaves: Array<{
+        summary: string;
+        rawArtifactIds: string[];
+        sourceEntryIds: string[];
+        tokenCount: number;
+      }> = [];
+      for (let index = 0; index < batches.length; index++) {
+        const batch = batches[index];
+        const outcome = outcomes[index];
+        let result: SummaryResult;
+        if (outcome.status === "ok") {
+          result = outcome.value;
+        } else {
+          result = deterministicSummary(batch.input, 2048);
+          if (outcome.status === "skipped") deadlineFallbackCount++;
+          else deterministicFallbackCount++;
+        }
+        if (result.level !== "deterministic") completedModelSummaryCount++;
         leaves.push({
           summary: result.prose,
-          rawArtifactIds: capture.rawArtifactIds.slice(
-            leaves.length,
-            leaves.length + 1,
-          ),
-          sourceEntryIds: chunk.entries.map((x: any) =>
-            String(x.id ?? x.entryId ?? ""),
-          ),
+          rawArtifactIds: batch.rawArtifactIds,
+          sourceEntryIds: batch.sourceEntryIds,
           tokenCount: result.tokenCount,
         });
       }
       const generation = (prior?.generation ?? 0) + 1;
+      let rootModel: ResolvedSummaryModel | undefined;
+      if (tiersActive) {
+        rootModel = await resolveTier(
+          preferredChain(config.rootSummaryModel, TIER_CHAINS.root),
+          tierDeps,
+          {
+            signal: event.signal,
+            activeModel: ctx.model,
+            minContextWindow: SUMMARY_RESERVE_TOKENS + MIN_VIABLE_BATCH_TOKENS,
+          },
+        );
+        status.lastRootSummaryModel = rootModel?.label;
+      }
+      const rootCall: SummaryCall =
+        rootModel === undefined
+          ? leafCall
+          : makeModelCall(rootModel.model, rootModel.apiKey);
+      const runRootSummary = async (
+        request: SummaryRequest,
+      ): Promise<SummaryResult> => {
+        try {
+          return await runSummary(request, rootCall);
+        } catch (error) {
+          if (event.signal?.aborted) throw error;
+          if (rootDeadline.expired()) {
+            deadlineFallbackCount++;
+            status.lastDeadlineStage ??= "root";
+            return deterministicSummary(request.input, request.targetTokens);
+          }
+          throw error;
+        }
+      };
       const dag = await (deps.dag ?? buildDag)({
         store: manager,
         generation,
@@ -458,7 +610,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
             )
           )
             return undefined;
-          const repaired = await runSummary({
+          const repaired = await runRootSummary({
             input: root.summary,
             targetTokens,
             category: "degraded LCM root repair",
@@ -470,7 +622,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         },
         summarize: async (input, targetTokens) =>
           (
-            await runSummary({
+            await runRootSummary({
               input,
               targetTokens,
               category: "LCM root condensation",
@@ -492,7 +644,12 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         nativeReplayStatus = "disabled";
       } else {
         const mechanism = selectNativeReplayMechanism(ctx.model, settings);
-        if (mechanism) {
+        if (mechanism && total.remainingMs() < replayRenderMs) {
+          status.lastDeadlineStage ??= "native-replay";
+          nativeReplayStatus = "failed";
+          nativeReplayError =
+            "internal deadline reached; native replay skipped";
+        } else if (mechanism) {
           try {
             const credential = await resolveNativeReplayCredential(
               ctx,
@@ -626,8 +783,12 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         }
       }
       status.lastSnapcompactFrameCount = undefined;
+      const degradeToContextFull =
+        renderer === "snapcompact" &&
+        total.remainingMs() < Math.min(2_500, replayRenderMs);
+      if (degradeToContextFull) status.lastDeadlineStage ??= "total";
       let result =
-        renderer === "context-full"
+        renderer === "context-full" || degradeToContextFull
           ? renderContextFull({
               preparation: event.preparation,
               state: dag.state,
@@ -682,7 +843,12 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         settings.remoteEnabled !== false && renderer === "context-full";
       status.lastDeterministicFallbackCount = deterministicFallbackCount;
       status.lastSummaryQuality =
-        deterministicFallbackCount === 0 ? "model" : "deterministic-fallback";
+        deterministicFallbackCount === 0 && deadlineFallbackCount === 0
+          ? "model"
+          : "deterministic-fallback";
+      status.lastCompletedModelSummaryCount = completedModelSummaryCount;
+      status.lastDeadlineFallbackCount = deadlineFallbackCount;
+      status.lastElapsedMs = Date.now() - startedAt;
       status.lastNativeReplayStatus = nativeReplayStatus;
       status.lastNativeReplayProvider = nativeReplayProvider;
       status.lastNativeReplayItemCount = nativeReplayItemCount;

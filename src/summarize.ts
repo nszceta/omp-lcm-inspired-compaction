@@ -91,6 +91,31 @@ function boundedDeterministic(
   );
 }
 
+/**
+ * Pure deterministic fallback shared by `summarizeText` and direct callers.
+ * Never throws; always bounded to the target budget.
+ */
+export function deterministicSummary(
+  input: string,
+  targetTokens: number,
+  count: TokenCounter = DEFAULT_COUNT,
+): SummaryResult {
+  const target = Math.max(1, Math.floor(targetTokens));
+  const retrieval = boundedByTokens(
+    RETRIEVAL_WORDING,
+    Math.floor(target / 4),
+    count,
+  );
+  const retrievalTokens = count(retrieval);
+  const candidateTarget = Math.max(1, target - retrievalTokens);
+  const prose =
+    candidateTarget > 0
+      ? boundedDeterministic(input, candidateTarget, count)
+      : "";
+  const tokenCount = count(prose) + retrievalTokens;
+  return { prose, retrieval, level: "deterministic", tokenCount };
+}
+
 function modelPrompt(
   level: "normal" | "aggressive",
   category?: string,
@@ -148,12 +173,7 @@ export async function summarizeText(
   }
 
   checkAbort(signal);
-  const prose =
-    candidateTarget > 0
-      ? boundedDeterministic(request.input, candidateTarget, count)
-      : "";
-  const tokenCount = count(prose) + retrievalTokens;
-  return { prose, retrieval, level: "deterministic", tokenCount };
+  return deterministicSummary(request.input, target, count);
 }
 
 export const convergeSummary = summarizeText;

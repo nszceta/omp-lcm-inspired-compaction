@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { summarizeText } from "../src/summarize.ts";
+import {
+  deterministicSummary,
+  RETRIEVAL_WORDING,
+  type SummaryResult,
+  summarizeText,
+} from "../src/summarize.ts";
 import { modelCall } from "./helpers.ts";
 
 describe("summary convergence", () => {
@@ -46,5 +51,61 @@ describe("summary convergence", () => {
         (s) => s.length,
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("deterministicSummary", () => {
+  test("returns level deterministic with bounded prose containing the fallback marker", () => {
+    const result = deterministicSummary("source ".repeat(400), 50);
+    expect(result.level).toBe("deterministic");
+    expect(result.prose).toContain("deterministic fallback");
+    expect(result.tokenCount).toBeGreaterThan(0);
+    expect(result.tokenCount).toBeLessThanOrEqual(50);
+    expect(result.retrieval.startsWith("Retrieval:")).toBe(true);
+    const roomy = deterministicSummary("source ".repeat(400), 1_000);
+    expect(roomy.retrieval).toBe(RETRIEVAL_WORDING);
+  });
+
+  test("matches summarizeText deterministic branch exactly for identical inputs", async () => {
+    const input = "source ".repeat(400);
+    const target = 50;
+    const count = (s: string) => Math.ceil(s.length / 4);
+    const viaText = await summarizeText(
+      { input, targetTokens: target },
+      async () => {
+        throw new Error("unavailable");
+      },
+      count,
+    );
+    const viaDirect = deterministicSummary(input, target, count);
+    expect(viaDirect.prose).toBe(viaText.prose);
+    expect(viaDirect.retrieval).toBe(viaText.retrieval);
+    expect(viaDirect.tokenCount).toBe(viaText.tokenCount);
+    expect(viaDirect.level).toBe(viaText.level);
+    expect(viaText.level).toBe("deterministic");
+  });
+
+  test("never throws and stays bounded on hostile targets", () => {
+    const input = "x".repeat(2_000);
+    for (const target of [
+      Number.NaN,
+      -10,
+      0,
+      1,
+      1.9,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      let result: SummaryResult | undefined;
+      expect(() => {
+        result = deterministicSummary(input, target);
+      }).not.toThrow();
+      expect(result?.level).toBe("deterministic");
+      expect(result?.tokenCount).toBeGreaterThanOrEqual(0);
+      if (Number.isFinite(target) && target >= 1) {
+        expect(result?.tokenCount).toBeLessThanOrEqual(
+          Math.max(1, Math.floor(target)),
+        );
+      }
+    }
   });
 });
