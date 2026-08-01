@@ -111,6 +111,35 @@ Expand node: artifact://17
 ```
 Use the registered `lcm_expand` tool for node structure and optional raw previews. Use `read artifact://17` or a selector such as `read artifact://17:1-300` for exact source, and `grep "symbol" artifact://17` for exact search. Root artifact IDs are shown by `/lcm dump`; IDs are numeric and scoped to the OMP session, so never predict an ID.
 
+The plugin registers two additional retrieval tools:
+
+- `lcm_describe` — metadata lookup without expansion. Given an artifact ID it
+  reports node kind/level/children/raw sources/source-entry count/token
+  estimate and the full summary text for `lcm-node` artifacts, entry/byte
+  statistics with a bounded preview for `lcm-raw` artifacts, and metadata for
+  any other artifact. With `explore: true` on a non-LCM artifact (an
+  OMP-spilled tool result), it produces a bounded, type-aware exploration
+  summary: JSON gets key/type/count extraction, CSV gets columns and row
+  statistics, SQL gets statement kinds and table names, code gets function and
+  class signatures, and unstructured text gets one model summary call using
+  the active model and key (degrading to a bounded head/tail preview on model
+  failure or abort). Metadata-only mode never calls a model.
+- `lcm_grep` — regex search over the full immutable history reachable from the
+  current roots (or from one `summaryId` subtree), grouped by the covering
+  summary node and paginated via `limit` (default 50, max 200). Roots are
+  discovered from the persisted branch, so it works after a reload. Per-artifact
+  scans are capped at 256 KiB and report `(partial scan)` when truncated;
+  missing artifacts are reported, never silently dropped.
+
+Oversized tool results are already stored in full by OMP itself: any result
+above the artifact-spill threshold is saved through the same session artifact
+store the plugin uses (`tools.artifactSpillThreshold`, default 50 KiB), with a
+bounded elided view plus a `[raw output: artifact://N]` footer left in the
+transcript. The plugin relies on that mechanism for large-file handling and
+adds no capture-time file pipeline: `lcm-raw` entries retain
+`details.meta.truncation.artifactId`, so the exact full text of any spilled
+result remains reachable through `read artifact://N` in this session's store.
+
 ## Rendering and remote behavior
 
 Context-full returns a complete custom compaction result containing portable
@@ -150,6 +179,52 @@ archival summary. If the event is aborted, the boundary is invalid, an artifact
 write fails, the model/key required for textual summarization is missing, or an
 explicit snapcompact renderer lacks image support, the plugin notifies and
 returns `{ cancel: true }`; it never falls through to built-in compaction.
+
+## Summarization model tiers and deadlines
+
+Source summarization runs through configurable model tiers resolved from the
+active extension context. The new `omp` settings (bounds enforced by clamping;
+invalid values fall back to defaults):
+
+| Setting | Values | Default | Meaning |
+|---|---|---|---|
+| `leafSummaryModel` | `tiny` \| `smol` \| `active` | `tiny` | Tier for leaf/source-batch summaries; the online TINY role is preferred |
+| `rootSummaryModel` | `tiny` \| `smol` \| `active` | `smol` | Tier for root condensation and repair |
+| `summaryConcurrency` | 1–8 | 4 | Maximum concurrent summary model calls |
+| `summaryBatchInputTokens` | 12000–96000 | 48000 | Maximum estimated tokens per consolidated summary batch |
+| `handlerDeadlineMs` | 10000–27000 | 24000 | Internal compaction deadline |
+
+`handlerDeadlineMs` stays below OMP's fixed 30-second extension-handler
+timeout; increasing OMP's timeout is neither required nor supported.
+
+Leaf/source-batch summaries prefer the online TINY role, resolved through the
+public extension model query facade (`ctx.models.resolve("@tiny")`); root
+condensation and repair prefer SMOL and fall back to the active model.
+Resolution order is leaf: `tiny` → `smol` → `active` → deterministic, and
+root: `smol` → `active` → `tiny` → deterministic. Fallback chains keep
+working with no TINY role configured. OMP's local title models are never used
+for source summarization: their input preprocessing would discard most of a
+12K-token chunk.
+
+Adjacent raw chunks are packed into model-aware summary batches (default 48K
+estimated tokens, reduced when the resolved model's context window requires a
+reserve), run through a bounded pool (default concurrency 4) with
+order-preserving results; a leaf node may reference multiple raw artifacts.
+
+The internal total deadline (default 24s) splits into a leaf stage (~58%), a
+root stage, and a replay/render reserve; individual model calls time out at 9s.
+Expired model work degrades to deterministic archival summaries, never to OMP
+built-in compaction, and user cancellation still cancels. When the deadline
+reserve is reached, native replay is skipped and snapcompact rendering may
+degrade to context-full roots; status records the reason.
+
+In addition to the existing fields, `/lcm status` now reports:
+
+- `lastStartedAt`, `lastElapsedMs` — when the last compaction ran and how long it took
+- `lastLeafSummaryModel`, `lastRootSummaryModel` — the concrete provider/model that summarized
+- `lastRawChunkCount`, `lastSummaryBatchCount`, `lastSummaryConcurrency` — input size and batching
+- `lastCompletedModelSummaryCount` — batches summarized by a model rather than the deterministic fallback
+- `lastDeadlineFallbackCount`, `lastDeadlineStage` — deadline pressure and the stage that first fell back
 
 ## Live provider replay verification
 

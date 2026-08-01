@@ -1,0 +1,8 @@
+The river flowed quietly past the old mill town. Fishermen gathered at dawn along
+the wooden jetty, and the bakery on the corner filled the morning air with the
+smell of fresh bread. By noon the market square was crowded with carts selling
+vegetables, cloth, and hand-thrown pottery. Children played near the fountain
+while their parents haggled over prices. In the evening the town settled again,
+and the mill wheel turned slowly under the stars. This paragraph exists purely
+so the prose exploration path of lcm_describe has deterministic content to
+summarize with the injected summarizer seam.

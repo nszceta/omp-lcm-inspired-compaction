@@ -59,6 +59,10 @@ describe("custom OMP test profile", () => {
     })(api, context);
     expect(tools.has("lcm_expand")).toBe(true);
     expect(typeof tools.get("lcm_expand")?.execute).toBe("function");
+    expect(tools.has("lcm_describe")).toBe(true);
+    expect(typeof tools.get("lcm_describe")?.execute).toBe("function");
+    expect(tools.has("lcm_grep")).toBe(true);
+    expect(typeof tools.get("lcm_grep")?.execute).toBe("function");
     const artifactPath = "/tmp/omp-lcm-profile-artifact-41";
     await Bun.write(
       artifactPath,

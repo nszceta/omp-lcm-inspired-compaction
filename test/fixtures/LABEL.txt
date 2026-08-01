@@ -1,0 +1,4 @@
+All files in this directory are hand-written test fixtures for the
+lcm_describe / lcm_grep tests in test/tools.test.ts (Wave 4b). None of
+them were captured from implementation output; every byte is authored
+by hand for deterministic assertions.

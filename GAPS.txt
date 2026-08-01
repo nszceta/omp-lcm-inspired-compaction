@@ -325,6 +325,14 @@ Required closure:
   Add policy-driven retrieval triggers or pre-turn relevance lookup when a public
   hook permits it. Keep exact citations to artifact IDs in retrieved answers.
 
+Status (2026-08-01): PARTIALLY CLOSED — PLAN.md Part III Candidate B
+  (`lcm_grep`) shipped: node-grouped, paginated, `summaryId`-scoped regex
+  search over reachable raw history (src/tools.ts, test/tools.test.ts),
+  reducing the guessing burden. Policy-driven triggers still need public hooks;
+  unscheduled. `lcm_grep` patterns are agent-supplied tool arguments
+  (semi-trusted, grep-tool norm); catastrophic-backtracking regexes are the
+  caller's responsibility, matching ordinary OMP grep behavior.
+
 GAP-022: Dump and expansion limits can hide deep or wide history
 ---------------------------------------------------------------
 Current behavior:
@@ -396,6 +404,14 @@ Required closure:
   Add structured, secret-safe metrics for source capture, leaf summarization,
   DAG condensation, native replay, payload sizes, and total compaction latency.
 
+Status (2026-08-01): PARTIALLY CLOSED — PLAN.md Part II's runtime-status
+  contract landed: lastStartedAt, lastElapsedMs, lastLeafSummaryModel,
+  lastRootSummaryModel, lastRawChunkCount, lastSummaryBatchCount,
+  lastSummaryConcurrency, lastCompletedModelSummaryCount,
+  lastDeadlineFallbackCount, lastDeadlineStage (src/controller.ts,
+  test/controller-deadline.test.ts). Full structured metrics (latency per
+  stage, payload sizes, retry counts) remain unscheduled.
+
 P3: LOWER-SEVERITY GAPS
 =======================
 
@@ -456,6 +472,35 @@ Required closure:
   Add a release canary that installs the tagged marketplace version, verifies
   `/lcm version`, performs local compaction, inspects the DAG, and optionally runs
   a credentialed native-replay canary in a protected environment.
+
+GAP-031: No type-aware exploration summaries for oversized tool results
+----------------------------------------------------------------------
+Current behavior:
+  OMP spills oversized tool results (above `tools.artifactSpillThreshold`,
+  default 50 KiB) to session artifacts with head+tail elision and an
+  `[raw output: artifact://N]` footer (output-meta.ts
+  `spillLargeResultToArtifact`). The plugin's raw capture retains the elided
+  view plus `details.meta.truncation.artifactId`. No semantic exploration
+  summary (JSON/CSV/SQL schema+shape, code structure, prose summary) is
+  generated anywhere; the model must read `artifact://N` directly to learn
+  what the elided middle contains.
+
+Why it matters:
+  Elided content is recoverable but opaque: the model does not know the
+  schema, shape, or structure of the omitted bytes without opening the
+  artifact. This is the OMP-terms version of the paper's large-file gap.
+
+Required closure:
+  Implement the lazy type-aware exploration summary in the proposed
+  `lcm_describe` tool (PLAN.md Part III Candidate A), on demand and bounded,
+  with no capture-time work inside the compaction hook.
+
+Status (2026-08-01): CLOSED — Candidate A shipped: `lcm_describe` explore mode
+  produces type-aware exploration summaries (JSON key/type/count extraction,
+  CSV columns/rows, SQL statement kinds and table names, code signatures,
+  prose via the active model with abort-safe head/tail degradation) in
+  src/explore.ts and src/tools.ts, covered by test/explore.test.ts and
+  test/tools.test.ts. Metadata-only mode performs no model call.
 
 Ranking notes
 -------------

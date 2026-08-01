@@ -6,7 +6,12 @@ import {
   createController,
   type LcmController,
 } from "./controller.ts";
-import { createLcmExpandHandler, registerLcmExpandTool } from "./tools.ts";
+import {
+  createLcmExpandHandler,
+  registerLcmDescribeTool,
+  registerLcmExpandTool,
+  registerLcmGrepTool,
+} from "./tools.ts";
 
 export const PLUGIN_VERSION = packageMetadata.version;
 export interface LcmExtensionOptions {
@@ -73,7 +78,11 @@ export function registerExtension(
       ...deps,
       status: runtimeStatus,
     }));
-  if (typeof api.registerTool === "function") registerLcmExpandTool(api, ctx);
+  if (typeof api.registerTool === "function") {
+    registerLcmExpandTool(api, ctx);
+    registerLcmDescribeTool(api, ctx);
+    registerLcmGrepTool(api, ctx);
+  }
   api.on?.("session_before_compact", (event: any, eventContext: any) =>
     ensure(eventContext).beforeCompact(event),
   );

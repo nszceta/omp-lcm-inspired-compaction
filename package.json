@@ -1,6 +1,6 @@
 {
   "name": "omp-lcm-inspired-compaction",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "Artifact-backed hierarchical LCM-inspired compaction for Oh My Pi",
   "type": "module",
   "license": "MIT",
@@ -33,6 +33,41 @@
           "snapcompact"
         ],
         "default": "auto"
+      },
+      "leafSummaryModel": {
+        "type": "enum",
+        "values": [
+          "tiny",
+          "smol",
+          "active"
+        ],
+        "default": "tiny",
+        "description": "Model tier for leaf/source-batch summaries (online TINY role preferred; local title models are never used)"
+      },
+      "rootSummaryModel": {
+        "type": "enum",
+        "values": [
+          "tiny",
+          "smol",
+          "active"
+        ],
+        "default": "smol",
+        "description": "Model tier for root condensation and repair"
+      },
+      "summaryConcurrency": {
+        "type": "number",
+        "default": 4,
+        "description": "Maximum concurrent summary model calls (1-8)"
+      },
+      "summaryBatchInputTokens": {
+        "type": "number",
+        "default": 48000,
+        "description": "Maximum estimated tokens per consolidated summary batch (12000-96000)"
+      },
+      "handlerDeadlineMs": {
+        "type": "number",
+        "default": 24000,
+        "description": "Internal compaction deadline; kept below OMP's fixed 30s handler timeout (10000-27000)"
       }
     }
   },
