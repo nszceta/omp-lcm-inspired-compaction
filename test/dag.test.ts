@@ -144,4 +144,116 @@ describe("immutable DAG", () => {
       }),
     ).rejects.toThrow();
   });
+  test("writes rawContents as lcm-raw artifacts before the leaf node", async () => {
+    const store = artifactStore();
+    const result = await buildDag({
+      store,
+      generation: 1,
+      leaves: [
+        { summary: "s", rawContents: ["a", "b"], sourceEntryIds: ["e"] },
+      ],
+    });
+    expect(store.saved.map((x) => x.toolType)).toEqual([
+      "lcm-raw",
+      "lcm-raw",
+      "lcm-node",
+    ]);
+    expect(store.saved[0]).toEqual({
+      id: "1",
+      content: "a",
+      toolType: "lcm-raw",
+    });
+    expect(store.saved[1]).toEqual({
+      id: "2",
+      content: "b",
+      toolType: "lcm-raw",
+    });
+    const node = JSON.parse(store.saved[2]?.content ?? "{}");
+    expect(node.rawSources).toEqual(["1", "2"]);
+    expect(result.roots).toHaveLength(1);
+    expect(result.roots[0]?.artifactId).toBe("3");
+  });
+  test("honors rawContents and rawArtifactIds precedence per leaf", async () => {
+    const store = artifactStore();
+    const result = await buildDag({
+      store,
+      generation: 1,
+      leaves: [
+        { summary: "a", rawContents: ["c", "d"], sourceEntryIds: ["e1"] },
+        { summary: "b", rawArtifactIds: ["100"], sourceEntryIds: ["e2"] },
+      ],
+    });
+    expect(store.saved).toHaveLength(4);
+    expect(store.saved[0]).toEqual({
+      id: "1",
+      content: "c",
+      toolType: "lcm-raw",
+    });
+    expect(store.saved[1]).toEqual({
+      id: "2",
+      content: "d",
+      toolType: "lcm-raw",
+    });
+    expect(store.saved[2]?.toolType).toBe("lcm-node");
+    expect(store.saved[3]?.toolType).toBe("lcm-node");
+    expect(JSON.parse(store.saved[2]?.content ?? "{}").rawSources).toEqual([
+      "1",
+      "2",
+    ]);
+    expect(JSON.parse(store.saved[3]?.content ?? "{}").rawSources).toEqual([
+      "100",
+    ]);
+    expect(result.roots.map((r) => r.artifactId)).toEqual(["3", "4"]);
+  });
+  test("aborts between raw content writes without saving a node", async () => {
+    const saved: { id: string; content: string; toolType: string }[] = [];
+    let rawWrites = 0;
+    const controller = new AbortController();
+    const store = {
+      saved,
+      saveArtifact(content: string, toolType: string) {
+        if (toolType === "lcm-raw") {
+          rawWrites += 1;
+          if (rawWrites === 2) {
+            controller.abort();
+            throw new DOMException("Aborted", "AbortError");
+          }
+        }
+        const id = String(saved.length + 1);
+        saved.push({ id, content, toolType });
+        return id;
+      },
+    };
+    await expect(
+      buildDag({
+        store,
+        generation: 1,
+        leaves: [
+          { summary: "s", rawContents: ["a", "b"], sourceEntryIds: ["e"] },
+        ],
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("Aborted");
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toEqual({ id: "1", content: "a", toolType: "lcm-raw" });
+  });
+  test("falls back to the single rawContent write when rawContents is absent", async () => {
+    const store = artifactStore();
+    const result = await buildDag({
+      store,
+      generation: 1,
+      leaves: [{ summary: "s", rawContent: "single", sourceEntryIds: ["e"] }],
+    });
+    expect(store.saved).toHaveLength(2);
+    expect(store.saved[0]).toEqual({
+      id: "1",
+      content: "single",
+      toolType: "lcm-raw",
+    });
+    expect(store.saved[1]?.toolType).toBe("lcm-node");
+    expect(JSON.parse(store.saved[1]?.content ?? "{}").rawSources).toEqual([
+      "1",
+    ]);
+    expect(result.roots[0]?.artifactId).toBe("2");
+  });
 });

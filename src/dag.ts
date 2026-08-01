@@ -30,6 +30,7 @@ export interface ArtifactStore {
 export interface NewLeaf {
   summary: string;
   rawArtifactIds?: string[];
+  rawContents?: string[];
   rawContent?: string;
   sourceEntryIds: string[];
   tokenCount?: number;
@@ -132,6 +133,13 @@ export async function buildDag(options: DagOptions): Promise<DagResult> {
     let rawIds: string[];
     if (leaf.rawArtifactIds) {
       rawIds = leaf.rawArtifactIds.map(checkId);
+    } else if (leaf.rawContents) {
+      const written: string[] = [];
+      for (const content of leaf.rawContents) {
+        checkAbort(signal);
+        written.push(String(await store.saveArtifact(content, "lcm-raw")));
+      }
+      rawIds = written.map(checkId);
     } else if (leaf.rawContent === undefined) {
       rawIds = [];
     } else {

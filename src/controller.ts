@@ -26,6 +26,7 @@ import { type LcmConfig, type Renderer, readConfig } from "./config.ts";
 import { parseLcmPreserveState } from "./contracts.ts";
 import { buildDag } from "./dag.ts";
 import { Deadline } from "./deadline.ts";
+import { countOrphanArtifacts, orphanStoreFor } from "./orphans.ts";
 import { runBoundedPool } from "./pool.ts";
 import { renderContextFull } from "./render-context-full.ts";
 import {
@@ -75,6 +76,7 @@ export interface LcmRuntimeStatus {
     tokenCount: number;
   }>;
   lastRawArtifactCount?: number;
+  lastOrphanArtifactCount?: number;
   lastSourceEntryCount?: number;
   lastTokensBefore?: number;
   lastFirstKeptEntryId?: string;
@@ -531,15 +533,26 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       const manager = ctx.sessionManager;
       if (!manager?.saveArtifact)
         throw new Error("Session artifact API unavailable");
-      const capture = await (deps.capture ?? captureRawSource)(
-        event,
-        (content, toolType) => manager.saveArtifact(content, toolType),
-        { contextWindow: ctx.model?.contextWindow },
-      );
-      status.lastRawChunkCount = capture.chunks.length;
       const prior = parseLcmPreserveState(
         event.preparation.previousPreserveData?.ompLcmArtifactsV1,
       );
+      delete status.lastOrphanArtifactCount;
+      const orphanStore = orphanStoreFor(manager);
+      if (orphanStore.listFiles) {
+        try {
+          status.lastOrphanArtifactCount = await countOrphanArtifacts(
+            orphanStore,
+            prior?.roots ?? [],
+            { signal: event.signal },
+          );
+        } catch {
+          // best-effort observability; never fail the run over accounting
+        }
+      }
+      const capture = await (deps.capture ?? captureRawSource)(event, undefined, {
+        contextWindow: ctx.model?.contextWindow,
+      });
+      status.lastRawChunkCount = capture.chunks.length;
       const total = new Deadline(config.handlerDeadlineMs, {
         signal: event.signal,
       });
@@ -658,11 +671,10 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         config.summaryBatchInputTokens,
         leafModel?.model.contextWindow,
       );
-      const batches = planSummaryBatches(
-        capture.chunks,
-        capture.rawArtifactIds,
-        { maxInputTokens: leafBudget, signal: event.signal },
-      );
+      const batches = planSummaryBatches(capture.chunks, {
+        maxInputTokens: leafBudget,
+        signal: event.signal,
+      });
       status.lastSummaryBatchCount = batches.length;
       const leafCall: SummaryCall =
         leafModel === undefined
@@ -706,7 +718,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       );
       const leaves: Array<{
         summary: string;
-        rawArtifactIds: string[];
+        rawContents: string[];
         sourceEntryIds: string[];
         tokenCount: number;
       }> = [];
@@ -724,7 +736,9 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         if (result.level !== "deterministic") completedModelSummaryCount++;
         leaves.push({
           summary: result.prose,
-          rawArtifactIds: batch.rawArtifactIds,
+          rawContents: batch.chunkIndexes.map(
+            (index) => capture.chunks[index]?.content ?? "",
+          ),
           sourceEntryIds: batch.sourceEntryIds,
           tokenCount: result.tokenCount,
         });
@@ -996,7 +1010,7 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         sourceEntryCount: root.sourceEntryCount,
         tokenCount: root.tokenCount,
       }));
-      status.lastRawArtifactCount = capture.rawArtifactIds.length;
+      status.lastRawArtifactCount = capture.chunks.length;
       status.lastSourceEntryCount = leaves.reduce(
         (count, leaf) => count + leaf.sourceEntryIds.length,
         0,

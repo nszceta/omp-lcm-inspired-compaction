@@ -29,6 +29,33 @@ describe("source selection", () => {
       `${jsonLines(entries.slice(0, 2))}\n`,
     );
   });
+  test("deferred capture writes no artifacts; eager capture writes every chunk", async () => {
+    const entries = [
+      entry("a", "A"),
+      entry("b", "B"),
+      entry("c", "C"),
+      entry("keep", "K"),
+    ];
+    const ev = event(preparation("keep"), entries);
+    // one token per entry -> every entry is its own chunk
+    const options = { targetTokens: 1, estimateTokens: () => 1 };
+    const saved: string[] = [];
+    const eager = await captureRawSource(
+      ev,
+      async (content) => {
+        saved.push(content);
+        return String(saved.length);
+      },
+      options,
+    );
+    expect(saved).toHaveLength(3);
+    expect(eager.chunks).toHaveLength(3);
+    expect(eager.rawArtifactIds).toEqual(["1", "2", "3"]);
+    const deferred = await captureRawSource(ev, undefined, options);
+    expect(deferred.rawArtifactIds).toEqual([]);
+    expect(deferred.chunks).toEqual(eager.chunks);
+    expect(deferred.selection).toEqual(eager.selection);
+  });
   test("resumes after matching LCM compaction and excludes recent", () => {
     const state = { version: 1, generation: 4, roots: [] };
     const entries = [

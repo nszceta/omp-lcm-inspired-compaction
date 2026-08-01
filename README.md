@@ -2,20 +2,52 @@
 
 Artifact-backed hierarchical compaction for Oh My Pi (OMP). The plugin keeps exact discarded session entries in session-scoped artifacts, builds bounded immutable summary roots, and renders those roots through OMP context-full or public snapcompact APIs.
 
-## How it works
+## What it is
 
-LCM is lossless because it separates **what stays in the active context** from
-**what remains recoverable**. Compaction produces bounded summaries for the
-active context, but every discarded session entry is also stored exactly in a
-session-scoped `lcm-raw` artifact. Immutable summary nodes record provenance
-and links to those raw artifacts.
+OMP (Oh My Pi) is the coding-agent harness that this plugin extends. When a
+conversation grows past its context window, OMP *compacts* it: it summarizes
+the history so the model can keep going. The built-in compaction loses
+information — exact prompts, tool outputs, and file contents get collapsed
+into prose.
 
-The first compaction creates level-0 leaf nodes. Each later compaction loads the
-previous roots, adds new level-0 leaves, and condenses them into immutable
-parent nodes whenever the active root set exceeds four roots or the summary
-token budget. Parent nodes link to their children, and children link
-transitively to the exact raw source, so history remains reachable without
-copying the transcript into every new summary:
+LCM (Lossless Context Management) is a design from the research paper
+[arXiv:2605.04050](https://arxiv.org/abs/2605.04050): compaction doesn't have
+to lose anything. Keep every discarded byte in an artifact store, build a
+*hierarchical* set of summaries over it, and let the model dig back into the
+raw history on demand. This plugin is a standalone OMP extension that
+replaces OMP's built-in compaction with an LCM implementation. It hooks the
+exact moment OMP is about to compact (`session_before_compact`), does its
+work, and hands back a complete compaction result — with one hard
+constraint: OMP gives the hook **30 seconds** total.
+
+## The three pillars
+
+**1. Raw preservation.** Everything the compaction would discard (messages,
+tool calls/results, metadata) is serialized into JSONL *raw artifacts* — one
+file per chunk of roughly 12k tokens — stored in the session's artifact
+store. These are the ground truth; summaries are only ever an index over
+them.
+
+**2. Hierarchical summaries (the DAG).** Summaries form a tree:
+
+- *Leaf nodes*: each batch of raw chunks becomes one model-written summary,
+  and the leaf node records which raw artifacts it covers.
+- *Condensed nodes*: when there are more than 4 roots (or they exceed the
+  summary token budget), groups of roots are summarized into a parent node
+  that records its children. Repeat until at most 4 *active roots* remain.
+- Roots are the only thing carried forward in the next conversation's
+  preserve data; everything below stays in the artifact store, reachable by
+  id.
+
+```mermaid
+graph TD
+    RAW[raw chunks · JSONL] --> LEAF[leaf summary nodes]
+    LEAF --> COND[condensed parent nodes]
+    COND --> ROOT[active roots · max 4]
+```
+
+Compaction generations compose: each later compaction loads the previous
+roots, adds new level-0 leaves, and condenses:
 
 ```text
 generation 1:  leaf A ── raw A     leaf B ── raw B
@@ -30,13 +62,115 @@ generation 3:  parent E
                 └── leaf D
 ```
 
-Only a bounded set of current roots is carried forward in OMP's
-`preserveData`; older nodes and raw artifacts remain available through their
-links. This gives OMP a small, useful context while retaining exact historical
-source for later retrieval with `lcm_expand`, `read artifact://ID`, or
-`grep` against an artifact URI. The summaries are intentionally lossy views
-for context efficiency; the archival graph is lossless because the original
-discarded entries are preserved verbatim.
+The model sees roots rendered as `### Root 1 / <summary> / Expand node:
+artifact://<id>`, so it can expand any branch with a retrieval tool. The
+summaries are intentionally lossy views for context efficiency; the archival
+graph is lossless because the original discarded entries are preserved
+verbatim.
+
+**3. Provider-native replay.** For OpenAI-Codex models, the plugin *also*
+runs OMP's own remote compaction alongside the local summaries and persists
+the provider's encrypted *replacement history* into the session. On the next
+request, the provider reconstructs the prior conversation natively — the
+model continues with the real previous turns, not just a summary. This is
+gated by a *lineage* check (provider, model, endpoint, and credential
+identity must all match) so one model's encrypted history is never fed to a
+different model. If replay fails, the textual LCM result still stands —
+replay is a bonus, not a dependency.
+
+## What happens during compaction (the 30-second window)
+
+1. **Capture** — select the discarded source entries and chunk them into raw
+   JSONL in memory. No artifacts are written yet; writes are deferred to the
+   DAG phase so a mid-run abort leaves zero artifacts.
+2. **Orphan accounting** — count artifact files not referenced by any
+   installed node or root and report them in status
+   (`lastOrphanArtifactCount`). Detection only: OMP exposes no delete API, so
+   garbage collection is impossible from the extension boundary.
+3. **Tier resolution** — pick a model tier for leaf summaries
+   (`leafSummaryModel`/`rootSummaryModel`: `tiny`, `smol`, or `active`),
+   checking each candidate's context window fits the batches.
+4. **Batched leaf summaries** — raw chunks are consolidated into
+   model-aware batches (default 48k estimated tokens), run through a bounded
+   pool (default 4 concurrent calls) under a hard internal deadline.
+5. **Root condensation** — resolve the root model, then condense/repair the
+   DAG to at most 4 roots, writing each raw artifact immediately before its
+   leaf node (abort-safe: a signal check between every write).
+6. **Native replay** — the OpenAI v1/v2 remote compaction, deadline-gated
+   and lineage-gated.
+7. **Render** — produce the final OMP result: `context-full` (complete
+   replacement context) or `snapcompact` (vision-model frame summaries),
+   degrading snapcompact to context-full only under deadline pressure.
+8. **Status** — persist diagnostics as a session entry so `/lcm status`,
+   `/lcm dump`, and `/lcm version` keep reporting the last run across
+   reloads.
+
+**Deadlines** are why this fits in 30 seconds: an internal budget
+(`handlerDeadlineMs`, default 24s) is split across the leaf stage, root
+stage, native replay, and a render reserve, and every stage checks its
+remaining time. If the budget runs out, batches degrade to a *deterministic
+fallback* — a bounded, byte-exact excerpt marked `[deterministic fallback]`
+— instead of failing the compaction or fabricating content.
+
+**Auth** goes through OMP's own credential machinery: 401 forces an OAuth
+bearer refresh, 403/usage-limit rotates credentials. Without this, a stale
+token would silently degrade every summary to the fallback.
+
+**Fail-closed** is the operating principle: any unexpected error returns
+`{ cancel: true }` (OMP skips the LCM result) — never a silently wrong
+compaction, never a fall-through to built-in behavior without notice.
+
+## Data contracts
+
+- `lcm-raw` — JSONL chunk artifact.
+- `lcm-node` — summary node artifact: schema `omp-lcm-node/v1`, kind
+  (`leaf-summary`/`condensed-summary`/`legacy-summary`), children ids,
+  `rawSources` ids, source entry ids/counts.
+- Preserve state `ompLcmArtifactsV1` — `{ version, generation, roots }`;
+  generation increments each compaction, roots carry artifact ids.
+- Artifact ids are numeric strings, session-scoped (a documented limitation:
+  not globally unique).
+
+## Retrieval tools
+
+The model's way back into history: `lcm_expand` walks a node's subtree with
+optional raw previews, `lcm_describe` reads metadata without expanding
+content (plus type-aware exploration of OMP-spilled tool results), and
+`lcm_grep` regex-searches the raw history reachable from the roots. Exact
+source is also reachable directly through OMP's own `read` and `grep` against
+`artifact://` URIs. See [Retrieval](#retrieval) for full usage, bounds, and
+id semantics.
+
+## Reliability hardening
+
+- Every summary call runs through the registry's auth-retry resolver:
+  401 force-refresh, 403/usage-limit rotation, failures recorded in status
+  instead of swallowed.
+- The session id is forwarded to the native replay request; replay failures
+  surface as a bounded notification while the textual LCM result still
+  completes.
+- Diagnostics persist across extension reloads (`lcm-status` session entry).
+- Raw artifacts are written only immediately before their leaf node, so an
+  abort before the first node write leaves **zero** new artifacts
+  (regression-tested).
+- `bun run canary` automates the release gate: pack the plugin, install the
+  packed directory into a clean temporary OMP profile, verify the install,
+  then run the opt-in live integration against configured credentials —
+  non-zero exit on any failure.
+
+## Current state
+
+- Test evidence (unit suite counts, live integration results against real
+  OpenAI-Codex credentials, typecheck status) is kept in `VERIFICATION.md`;
+  run `bun test` and `bun run test:integration` to reproduce it.
+- Every P0/P1 gap is closed or explicitly accepted with a written
+  disposition. Documented non-goals: no async soft-threshold compaction, no
+  artifact transactions or orphan GC (blocked on public OMP APIs), raw
+  artifacts are plaintext at rest, and the deterministic fallback preserves
+  bytes rather than semantics.
+- Release note: the marketplace resolves from git tags; `v0.2.3` is the
+  latest published release (Part II deadline-safe tiers, Part IV reliability
+  hardening, and Part V orphan-window hardening + release canary).
 
 ## Install and enable
 
@@ -312,6 +446,30 @@ The canary scope is specifically the existing authenticated OpenAI-Codex
 connection. A direct API-key-authenticated `openai` provider was not configured
 or exercised, so this evidence must not be generalized to that credential and
 endpoint path.
+
+## Release canary
+
+The automated release gate runs in one command:
+
+```text
+bun run canary
+```
+
+The canary packs the plugin, extracts the tarball, installs the packed
+directory into a clean temporary OMP profile (fresh `OMP_PROFILE`; the
+profile and temp state are removed on the way out), verifies the install with
+`omp plugin list`, then runs the opt-in live integration
+(`LCM_LIVE_INTEGRATION=1`) against configured OpenAI-Codex credentials. Any
+step failure exits non-zero, so a broken pack, install, or live replay fails
+the release. The install step validates the packed artifact end to end
+(content, manifest, registration) in a fresh profile; the live step runs the
+repo's integration suite, which builds an in-memory session from `src/` and
+therefore runs with the operator's real environment (credentials from the
+default profile) rather than the isolated canary profile.
+
+Requirements: the `omp` CLI on PATH, configured OpenAI-Codex credentials in
+the environment, and network access. The manual live loop documented above is
+the exception, not the rule; the canary is the gate.
 
 ## Limitations
 

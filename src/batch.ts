@@ -3,7 +3,7 @@ import { serializeSummaryEntries } from "./source.ts";
 
 export interface SummaryBatch {
   input: string;
-  rawArtifactIds: string[];
+  chunkIndexes: number[];
   sourceEntryIds: string[];
   entryCount: number;
   estimatedInputTokens: number;
@@ -17,11 +17,8 @@ export interface PlanBatchesOptions {
 
 export function planSummaryBatches(
   chunks: readonly RawChunk[],
-  rawArtifactIds: readonly string[],
   options: PlanBatchesOptions,
 ): SummaryBatch[] {
-  if (chunks.length !== rawArtifactIds.length)
-    throw new Error("raw artifact count mismatch");
   if (chunks.length === 0) return [];
   const budget = Math.max(1, Math.floor(options.maxInputTokens));
   const batches: SummaryBatch[] = [];
@@ -33,7 +30,7 @@ export function planSummaryBatches(
     const estimatedInputTokens = currentTokens;
     batches.push({
       input: serializeSummaryEntries(entries),
-      rawArtifactIds: rawArtifactIds.slice(start, end),
+      chunkIndexes: range(start, end),
       sourceEntryIds: entries.map((entry) =>
         String(entry.id ?? entry.entryId ?? ""),
       ),
@@ -57,4 +54,10 @@ export function planSummaryBatches(
   }
   if (current.length > 0) flush(chunks.length);
   return batches;
+}
+
+function range(start: number, end: number): number[] {
+  const indexes: number[] = [];
+  for (let i = start; i < end; i++) indexes.push(i);
+  return indexes;
 }

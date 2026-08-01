@@ -68,11 +68,14 @@
    contract; GAP-021 is partially addressed by Part III Candidate B.
    `GAPS.txt` remains the detailed register; PLAN.md is authoritative for
    dispositions.
-2. **Next step (Part V): orphan-window hardening and automated release
-   canary** — shrink the GAP-012 artifact orphan window (defer raw writes
-   until their summaries succeed), add `lastOrphanArtifactCount`
-   observability (GAP-023), and automate the live release canary (GAP-030).
-   See Part V.
+2. **Part V (implemented 2026-08-01): orphan-window hardening and automated
+   release canary** — raw artifacts are now written only immediately before
+   their leaf node (an abort before the first node write leaves zero
+   artifacts), `lastOrphanArtifactCount` reports files not referenced by any
+   installed node or root at run start (GAP-012 mitigation + GAP-023
+   observability), and `bun run canary` runs pack → clean-profile install →
+   live integration, failing the release on any step failure (GAP-030
+   closed). See Part V.
 3. **Deferred — `fileRefs` node field.** Optional additive field on
    `LcmNodeArtifactV1` recording spilled-artifact IDs; gated on `lcm_describe`
    showing real use. Old nodes are never rewritten; parsers already tolerate
@@ -2024,14 +2027,14 @@ release gate (GAP-030).
 
 ## Part V acceptance
 
-- [ ] A mid-run abort before the first node write leaves zero new artifacts
+- [x] A mid-run abort before the first node write leaves zero new artifacts
       in the session store (regression test with a store that records
       writes).
-- [ ] Failed runs report the count of unlinked artifacts in
+- [x] Failed runs report the count of unlinked artifacts in
       `lastOrphanArtifactCount`; linked artifacts are never counted.
-- [ ] The canary script runs pack → clean-profile install → live
+- [x] The canary script runs pack → clean-profile install → live
       integration in one command and exits non-zero on any failure.
-- [ ] `bun test` (unit + existing live) and typecheck stay green.
+- [x] `bun test` (unit + existing live) and typecheck stay green.
 
 ## Part V non-goals
 
@@ -2132,7 +2135,10 @@ Raw/leaf/parent writes are sequential; later failures can orphan earlier
 writes. Disposition: use an OMP transaction API if one becomes public; until
 then, record pending writes and add safe orphan discovery/GC that never
 deletes reachable artifacts. Part III references this in the async-compaction
-non-goal.
+non-goal. Part V mitigates the write-order window: raw artifacts are written
+only immediately before their leaf node, so an abort before the first node
+write leaves zero artifacts; rollback/GC still blocked on a public OMP
+transaction API.
 
 **GAP-013 — Local semantic summarization and native replay are sequential
 (open).** Eligible compactions pay both latencies serially. Disposition:
@@ -2206,7 +2212,9 @@ Disposition: reachability analysis from installed roots, dry-run reporting,
 configurable retention, safe deletion integrated with the session store;
 assigned to Part V (orphan accounting + orphan-window hardening) for the
 observability half; safe deletion remains blocked on a public OMP delete
-API.
+API. Part V ships the observability half: `lastOrphanArtifactCount` reports
+files not referenced by any installed node or root at run start; safe
+deletion remains blocked on a public OMP delete API.
 
 **GAP-024 — Preserve-state schema evolution has no migration framework
 (open).** Disposition: versioned migrations, forward-compatible unknown
@@ -2246,11 +2254,11 @@ live harness run against 17.2.3, and the auth-retry APIs used exist in both
 17.1.8 and 17.2.3, keeping the plugin compatible with both lines.
 See Part IV.
 
-**GAP-030 — No automated live release canary (open).** Disposition: a
-post-release canary installing the marketplace tag, verifying `/lcm version`,
-local compaction, DAG inspection, and optional credentialed native replay in
-a protected environment; assigned to Part V (next step) as the automated
-release canary script.
+**GAP-030 — No automated live release canary (closed 2026-08-01).**
+Disposition: automated release canary script (`bun run canary`) packs the
+plugin, installs it into a clean temporary OMP profile, and runs the opt-in
+live integration (`LCM_LIVE_INTEGRATION=1`) failing the release on any step
+failure; manual live loops remain documented as the exception.
 
 **GAP-031 — No type-aware exploration summaries for oversized tool results
 (closed 2026-08-01).** OMP spills oversized results with head+tail elision

@@ -324,3 +324,79 @@ GAP-016 replay-failure notification, GAP-027 status persistence) are
 unit-verified — the live run's Spark session selects the v2 replay path and
 replay succeeds, so neither the v1 request shape nor the failure notification
 fires on it.
+
+# Verification log — Orphan-window hardening and automated release canary (2026-08-01, plan Part V)
+
+Package: `omp-lcm-inspired-compaction` 0.2.2 (OMP 17.2.3)
+
+## Fixes in this pass
+
+1. **Artifact orphan window shrunk (GAP-012 mitigation).** Raw JSONL
+   artifacts are no longer written during capture. `captureRawSource` keeps
+   chunks in memory (deferred mode: `saveArtifact` optional, zero writes)
+   and each raw artifact is written immediately before its leaf node inside
+   `buildDag` (`NewLeaf.rawContents`, one `checkAbort` per write), so an
+   abort before the first node write leaves zero new artifacts. The
+   remaining window (leaf nodes written, roots not installed) is a handful
+   of nodes. Regression test: a mid-run abort (summary call aborts the event
+   signal and rejects) returns `{ cancel: true }` with an empty artifact
+   store.
+2. **Orphan accounting (GAP-023 observability).** New `src/orphans.ts`:
+   `orphanStoreFor` adapts the session manager / `ArtifactManager`
+   (methods stay `this`-bound — the real manager reads private fields), and
+   `countOrphanArtifacts` walks root reachability (children + rawSources)
+   over files matching `{id}.{toolType}.log`, bounded to 1000 node reads,
+   abort-safe, never throwing on malformed content. The controller reports
+   `lastOrphanArtifactCount` at run start (best-effort, never fails the
+   run). Failed runs carry the count; linked artifacts are never counted
+   (unit suite plus a controller regression that seeds a linked node+raw
+   plus an orphan and asserts exactly the orphan is counted).
+3. **Automated live release canary (GAP-030 closed).** `scripts/canary.ts`
+   (`bun run canary`) packs the plugin, extracts the tarball, installs the
+   packed directory into a clean temporary OMP profile (fresh `OMP_PROFILE`;
+   profile dir and temp state removed on the way out — cleanup runs because
+   failures are thrown, not `process.exit`-ed), verifies the install via
+   `omp plugin list`, then runs the opt-in live integration
+   (`LCM_LIVE_INTEGRATION=1`), exiting non-zero on any step failure.
+
+## Full tests and static checks
+
+```text
+$ bun test
+222 pass
+3 skip (live integration, gated on LCM_LIVE_INTEGRATION=1)
+0 fail
+1097 expect() calls
+Ran 225 tests across 22 files. [5.45s]
+$ bun run typecheck
+tsc --noEmit: clean
+```
+
+New tests: `test/orphans.test.ts` (reachability, malformed/missing content,
+abort, read cap, `this`-bound store adaptation), controller regressions in
+`test/controller.test.ts` (abort-before-first-node leaves zero artifacts;
+failed runs report `lastOrphanArtifactCount` with linked files excluded;
+stores without `listFiles` leave the field undefined), `test/dag.test.ts`
+(rawContents write order and precedence), `test/source.test.ts` (deferred
+capture writes nothing), `test/batch.test.ts` (`chunkIndexes` provenance).
+Changed files are biome-clean apart from pre-existing legacy `any` sites in
+`controller.ts`/`helpers.ts`/`controller.test.ts` (present on HEAD).
+
+## Canary run — fail-closed without credentials (2026-08-01)
+
+```text
+$ bun run canary
+[canary] pack: ok (omp-lcm-inspired-compaction-0.2.2.tgz)
+[canary] install: ok (profile lcm-canary-<rand>)   # Linked from /tmp/omp-lcm-canary-*/package
+[canary] plugin list: ok (omp-lcm-inspired-compaction installed)
+[canary] FAILED at live integration: exit code 1   # No API key found for openai-codex
+$ echo $?
+1
+```
+
+The environment has no OpenAI-Codex credentials, so the live step fails
+closed exactly as designed: pack, extract, clean-profile install, and
+`plugin list` verification all pass, the live step exits non-zero, and no
+`lcm-canary-*` profile directory or temp state remains after the run. A
+credentialed run is the release gate; the manual live loop remains the
+documented exception.

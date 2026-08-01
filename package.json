@@ -1,6 +1,6 @@
 {
   "name": "omp-lcm-inspired-compaction",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Artifact-backed hierarchical LCM-inspired compaction for Oh My Pi",
   "type": "module",
   "license": "MIT",
@@ -11,6 +11,7 @@
   ],
   "exports": "./src/index.ts",
   "scripts": {
+    "canary": "bun run scripts/canary.ts",
     "test": "bun test",
     "test:omp-profile": "bun test test/omp-profile.test.ts",
     "test:integration": "LCM_LIVE_INTEGRATION=1 bun test test/native-replay.integration.test.ts",

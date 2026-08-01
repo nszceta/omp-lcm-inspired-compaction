@@ -198,6 +198,11 @@ Required closure:
   write set and add safe orphan discovery and garbage collection that never
   deletes artifacts reachable from any installed root.
 
+Status (2026-08-01): Part V mitigation shipped — raw artifacts are written
+  only immediately before their leaf node, so an abort before the first node
+  write leaves zero artifacts; rollback/GC still blocked on a public OMP
+  transaction API.
+
 GAP-013: Local semantic summarization and native replay are sequential
 --------------------------------------------------------------------
 Current behavior:
@@ -373,6 +378,10 @@ Required closure:
   Add reachability analysis from every installed preserve root, dry-run reporting,
   configurable retention, and safe deletion integrated with the session store.
 
+Status (2026-08-01): Part V observability shipped — `lastOrphanArtifactCount`
+  reports files not referenced by any installed node or root at run start;
+  safe deletion still blocked on a public OMP delete API.
+
 GAP-024: Preserve-state schema evolution has no migration framework
 -------------------------------------------------------------------
 Current behavior:
@@ -511,6 +520,13 @@ Required closure:
   Add a release canary that installs the tagged marketplace version, verifies
   `/lcm version`, performs local compaction, inspects the DAG, and optionally runs
   a credentialed native-replay canary in a protected environment.
+
+Status (2026-08-01): CLOSED — `scripts/canary.ts` (`bun run canary`) packs the
+  plugin, extracts the tarball, installs the packed directory into a clean
+  temporary OMP profile (fresh `OMP_PROFILE`; profile and temp state removed
+  on the way out), verifies the install via `omp plugin list`, and runs the
+  opt-in live integration (`LCM_LIVE_INTEGRATION=1`), exiting non-zero on any
+  step failure; the manual live loop remains the documented exception.
 
 GAP-031: No type-aware exploration summaries for oversized tool results
 ----------------------------------------------------------------------

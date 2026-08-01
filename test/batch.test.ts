@@ -23,17 +23,15 @@ function entry(id: string, extra: Record<string, unknown> = {}): SourceEntry {
 
 describe("planSummaryBatches", () => {
   test("empty input returns []", () => {
-    expect(planSummaryBatches([], [], { maxInputTokens: 10 })).toEqual([]);
+    expect(planSummaryBatches([], { maxInputTokens: 10 })).toEqual([]);
   });
 
   test("one chunk yields one batch with full provenance", () => {
     const chunks = [chunk([entry("e1"), entry("e2")], 7, 0)];
-    const batches = planSummaryBatches(chunks, ["100"], {
-      maxInputTokens: 10,
-    });
+    const batches = planSummaryBatches(chunks, { maxInputTokens: 10 });
     expect(batches).toHaveLength(1);
     const batch = batches[0];
-    expect(batch.rawArtifactIds).toEqual(["100"]);
+    expect(batch.chunkIndexes).toEqual([0]);
     expect(batch.sourceEntryIds).toEqual(["e1", "e2"]);
     expect(batch.entryCount).toBe(2);
     expect(batch.estimatedInputTokens).toBe(7);
@@ -49,11 +47,10 @@ describe("planSummaryBatches", () => {
       chunk([entry("c")], 5, 2),
     ];
     // 3 + 4 + 5 = 12 == maxInputTokens -> single batch
-    const exact = planSummaryBatches(chunks, ["100", "101", "102"], {
-      maxInputTokens: 12,
-    });
+    const exact = planSummaryBatches(chunks, { maxInputTokens: 12 });
     expect(exact).toHaveLength(1);
     expect(exact[0]?.sourceEntryIds).toEqual(["a", "b", "c"]);
+    expect(exact[0]?.chunkIndexes).toEqual([0, 1, 2]);
     expect(exact[0]?.estimatedInputTokens).toBe(12);
     // same budget, but chunks sum to 13 (one extra token) -> splits into two
     const over = planSummaryBatches(
@@ -62,7 +59,6 @@ describe("planSummaryBatches", () => {
         chunk([entry("b")], 4, 1),
         chunk([entry("c")], 6, 2),
       ],
-      ["100", "101", "102"],
       { maxInputTokens: 12 },
     );
     expect(over).toHaveLength(2);
@@ -79,22 +75,20 @@ describe("planSummaryBatches", () => {
       chunk([entry("d")], 7, 3),
       chunk([entry("e")], 3, 4),
     ];
-    const batches = planSummaryBatches(chunks, ["0", "1", "2", "3", "4"], {
-      maxInputTokens: 10,
-    });
+    const batches = planSummaryBatches(chunks, { maxInputTokens: 10 });
     expect(batches).toHaveLength(3);
     expect(batches[0]?.sourceEntryIds).toEqual(["a"]);
     expect(batches[1]?.sourceEntryIds).toEqual(["b", "c"]);
     expect(batches[2]?.sourceEntryIds).toEqual(["d", "e"]);
-    expect(batches[0]?.rawArtifactIds).toEqual(["0"]);
-    expect(batches[1]?.rawArtifactIds).toEqual(["1", "2"]);
-    expect(batches[2]?.rawArtifactIds).toEqual(["3", "4"]);
+    expect(batches[0]?.chunkIndexes).toEqual([0]);
+    expect(batches[1]?.chunkIndexes).toEqual([1, 2]);
+    expect(batches[2]?.chunkIndexes).toEqual([3, 4]);
   });
 
   test("single oversized entry gets its own batch, oversized, input never truncated", () => {
     const entryJson = { id: "huge", body: "x".repeat(500) };
     const chunks = [chunk([entryJson as SourceEntry], 100, 0)];
-    const batches = planSummaryBatches(chunks, ["42"], { maxInputTokens: 10 });
+    const batches = planSummaryBatches(chunks, { maxInputTokens: 10 });
     expect(batches).toHaveLength(1);
     const batch = batches[0];
     expect(batch.oversized).toBe(true);
@@ -107,7 +101,6 @@ describe("planSummaryBatches", () => {
     // an oversized chunk never shares a batch with a following chunk
     const next = planSummaryBatches(
       [chunks[0], chunk([entry("small")], 2, 1)],
-      ["42", "43"],
       { maxInputTokens: 10 },
     );
     expect(next).toHaveLength(2);
@@ -122,13 +115,12 @@ describe("planSummaryBatches", () => {
       chunk([entry("e4"), entry("e5")], 4, 2),
       chunk([entry("e6")], 7, 3),
     ];
-    const ids = ["101", "102", "103", "104"];
-    const batches = planSummaryBatches(chunks, ids, { maxInputTokens: 10 });
-    const rawIds = batches.flatMap((b) => b.rawArtifactIds);
+    const batches = planSummaryBatches(chunks, { maxInputTokens: 10 });
+    const chunkIndexes = batches.flatMap((b) => b.chunkIndexes);
     const sourceIds = batches.flatMap((b) => b.sourceEntryIds);
-    expect(rawIds).toEqual(ids);
+    expect(chunkIndexes).toEqual([0, 1, 2, 3]);
     expect(sourceIds).toEqual(["e1", "e2", "e3", "e4", "e5", "e6"]);
-    expect(new Set(rawIds).size).toBe(4);
+    expect(new Set(chunkIndexes).size).toBe(4);
     expect(new Set(sourceIds).size).toBe(6);
     expect(batches.reduce((n, b) => n + b.entryCount, 0)).toBe(6);
   });
@@ -141,8 +133,8 @@ describe("planSummaryBatches", () => {
       chunk([entry("e4")], 3, 3),
     ];
     const options = { maxInputTokens: 10 };
-    const first = planSummaryBatches(chunks, ["1", "2", "3", "4"], options);
-    const second = planSummaryBatches(chunks, ["1", "2", "3", "4"], options);
+    const first = planSummaryBatches(chunks, options);
+    const second = planSummaryBatches(chunks, options);
     expect(second).toEqual(first);
     // chunks are walked in input order regardless of tokenCount
     expect(first.flatMap((b) => b.sourceEntryIds)).toEqual([
@@ -151,14 +143,9 @@ describe("planSummaryBatches", () => {
       "e3",
       "e4",
     ]);
-    expect(first.flatMap((b) => b.rawArtifactIds)).toEqual([
-      "1",
-      "2",
-      "3",
-      "4",
-    ]);
+    expect(first.flatMap((b) => b.chunkIndexes)).toEqual([0, 1, 2, 3]);
     // batches start at successive input positions; token counts never reorder chunks
-    expect(first.map((b) => b.sourceEntryIds[0])).toEqual(["e1", "e2", "e4"]);
+    expect(first.map((b) => b.chunkIndexes[0])).toEqual([0, 1, 3]);
   });
 
   test("opaque provider metadata is omitted from model-visible input", () => {
@@ -177,7 +164,7 @@ describe("planSummaryBatches", () => {
         0,
       ),
     ];
-    const batches = planSummaryBatches(chunks, ["9"], { maxInputTokens: 10 });
+    const batches = planSummaryBatches(chunks, { maxInputTokens: 10 });
     const input = batches[0]?.input ?? "";
     expect(input).toContain(OMISSION_MARKER);
     expect(input).not.toContain(secret);
@@ -188,25 +175,10 @@ describe("planSummaryBatches", () => {
     expect(input).toContain('"id":"e1"');
   });
 
-  test("mismatched raw artifact count throws", () => {
-    const chunks = [chunk([entry("a")], 1, 0), chunk([entry("b")], 1, 1)];
-    expect(() =>
-      planSummaryBatches(chunks, ["1"], { maxInputTokens: 10 }),
-    ).toThrow("raw artifact count mismatch");
-    expect(() =>
-      planSummaryBatches([chunks[0]], ["1", "2"], { maxInputTokens: 10 }),
-    ).toThrow("raw artifact count mismatch");
-    expect(() =>
-      planSummaryBatches([chunks[0]], [], { maxInputTokens: 10 }),
-    ).toThrow("raw artifact count mismatch");
-  });
-
   test("budget clamps to at least 1", () => {
     const chunks = [chunk([entry("a")], 1, 0), chunk([entry("b")], 2, 1)];
     for (const maxInputTokens of [0, -5, 0.4]) {
-      const batches = planSummaryBatches(chunks, ["1", "2"], {
-        maxInputTokens,
-      });
+      const batches = planSummaryBatches(chunks, { maxInputTokens });
       expect(batches[0]?.estimatedInputTokens).toBe(1);
       expect(batches[0]?.oversized).toBe(false);
       expect(batches[1]?.estimatedInputTokens).toBe(2);
@@ -215,7 +187,6 @@ describe("planSummaryBatches", () => {
     // fractional budgets floor, then clamp: 2.9 -> 2
     const fractional = planSummaryBatches(
       [chunk([entry("a")], 2, 0), chunk([entry("b")], 1, 1)],
-      ["1", "2"],
       { maxInputTokens: 2.9 },
     );
     expect(fractional).toHaveLength(2);
@@ -228,7 +199,6 @@ describe("planSummaryBatches", () => {
     try {
       planSummaryBatches(
         [chunk([entry("a")], 1, 0), chunk([entry("b")], 1, 1)],
-        ["1", "2"],
         { maxInputTokens: 10, signal: controller.signal },
       );
     } catch (error) {
@@ -247,7 +217,7 @@ describe("planSummaryBatches", () => {
       chunk([entry("c")], 1, 2),
     ];
     const run = (): SummaryBatch[] =>
-      planSummaryBatches(chunks, ["1", "2", "3"], {
+      planSummaryBatches(chunks, {
         maxInputTokens: 10,
         signal: controller.signal,
       });

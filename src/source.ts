@@ -209,7 +209,7 @@ export function planRawChunks(
     if (current.length > 0 && count + tokenCount > target) {
       chunks.push({
         entries: current,
-        content: current.map((item) => JSON.stringify(item)).join("\n") + "\n",
+        content: `${current.map((item) => JSON.stringify(item)).join("\n")}\n`,
         tokenCount: count,
       });
       current = [];
@@ -221,14 +221,14 @@ export function planRawChunks(
   if (current.length)
     chunks.push({
       entries: current,
-      content: current.map((item) => JSON.stringify(item)).join("\n") + "\n",
+      content: `${current.map((item) => JSON.stringify(item)).join("\n")}\n`,
       tokenCount: count,
     });
   return chunks;
 }
 export async function captureRawSource(
   event: SourceEvent,
-  saveArtifact: ArtifactSaver,
+  saveArtifact?: ArtifactSaver,
   options: {
     estimateTokens?: TokenEstimator;
     targetTokens?: number;
@@ -241,6 +241,7 @@ export async function captureRawSource(
     ...options,
     signal: event.signal,
   });
+  if (!saveArtifact) return { selection, chunks, rawArtifactIds: [] };
   const ids: string[] = [];
   for (const chunk of chunks) {
     checkAbort(event.signal);

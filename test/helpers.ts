@@ -16,6 +16,9 @@ export function artifactStore(start = 1) {
     getArtifactPath(id: string) {
       return store.getArtifact(id);
     },
+    listFiles() {
+      return saved.map((a) => `${a.id}.${a.toolType}.log`);
+    },
   };
   return store;
 }

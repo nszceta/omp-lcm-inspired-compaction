@@ -191,9 +191,6 @@ function reachableRawIds(
   return [...reachable].sort((a, b) => Number(a) - Number(b));
 }
 
-const allRawIds = () =>
-  Array.from({ length: ENTRY_COUNT }, (_, index) => String(index + 1));
-
 describe("controller deadlines and tiers", () => {
   test("consolidates 22 chunks into 6 bounded parallel batches and falls back before the deadline", async () => {
     const { ctx, store } = tieredContext();
@@ -238,12 +235,18 @@ describe("controller deadlines and tiers", () => {
       nodes.filter((node) => node.summary.includes("deterministic fallback")),
     ).toHaveLength(3);
 
-    // Leaves preserve chunk order: leaf i references the next raw artifact ids.
-    expect(nodes.flatMap((node) => node.rawSources)).toEqual(allRawIds());
+    // Deferred writes interleave raw ids with node ids; leaves preserve chunk
+    // order, so each leaf references exactly the raws written before it.
+    const rawArtifacts = store.saved
+      .filter((artifact) => artifact.toolType === "lcm-raw")
+      .map((artifact) => artifact.id);
+    expect(nodes.flatMap((node) => node.rawSources)).toEqual(rawArtifacts);
 
     // Every raw artifact id is reachable from the returned roots, exactly once.
     const state = result.compaction.preserveData.ompLcmArtifactsV1;
-    expect(reachableRawIds(store, state)).toEqual(allRawIds());
+    expect(reachableRawIds(store, state)).toEqual(
+      [...rawArtifacts].sort((a, b) => Number(a) - Number(b)),
+    );
 
     expect(controller.status.lastOutcome).toBe("success");
     expect(controller.status.lastRawChunkCount).toBe(22);
@@ -284,7 +287,12 @@ describe("controller deadlines and tiers", () => {
     expect(typeof controller.status.lastElapsedMs).toBe("number");
     expect(controller.status.lastRootCount ?? 0).toBeLessThanOrEqual(4);
     const state = result.compaction.preserveData.ompLcmArtifactsV1;
-    expect(reachableRawIds(store, state)).toEqual(allRawIds());
+    const rawArtifacts = store.saved
+      .filter((artifact) => artifact.toolType === "lcm-raw")
+      .map((artifact) => artifact.id);
+    expect(reachableRawIds(store, state)).toEqual(
+      [...rawArtifacts].sort((a, b) => Number(a) - Number(b)),
+    );
   });
 
   test("skips provider-native replay when the total deadline reserve is exhausted", async () => {
