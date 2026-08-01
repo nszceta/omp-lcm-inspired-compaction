@@ -168,9 +168,11 @@ id semantics.
   artifact transactions or orphan GC (blocked on public OMP APIs), raw
   artifacts are plaintext at rest, and the deterministic fallback preserves
   bytes rather than semantics.
-- Release note: the marketplace resolves from git tags; `v0.2.3` is the
+- Release note: the marketplace resolves from git tags; `v0.2.4` is the
   latest published release (Part II deadline-safe tiers, Part IV reliability
-  hardening, and Part V orphan-window hardening + release canary).
+  hardening, Part V orphan-window hardening + release canary, and the
+  GAP-032 fix that keeps the whole compaction handler inside OMP's 30s
+  extension-handler wall).
 
 ## Install and enable
 

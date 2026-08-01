@@ -1,6 +1,6 @@
 {
   "name": "omp-lcm-inspired-compaction",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Artifact-backed hierarchical LCM-inspired compaction for Oh My Pi",
   "type": "module",
   "license": "MIT",
