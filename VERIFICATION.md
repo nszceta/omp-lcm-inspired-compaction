@@ -401,7 +401,7 @@ closed exactly as designed: pack, extract, clean-profile install, and
 credentialed run is the release gate; the manual live loop remains the
 documented exception.
 
-# Verification log — OMP 30s handler-wall hotfix (2026-08-01, GAP-032)
+# Verification log — OMP 30s handler-wall hotfix (2026-08-01, GAP-034)
 
 Package: `omp-lcm-inspired-compaction` 0.2.3 (OMP 17.2.3)
 
@@ -430,7 +430,7 @@ resolution, the DAG write loop, and snapcompact rendering were bounded only
 by OMP's 30 s signal. A slow native compaction call ran the handler into
 the wall.
 
-## Fix (GAP-032 closure)
+## Fix (GAP-034 closure)
 
 - Prelude deadline (4 s from handler start) races config loading; expiry
   falls back to default config instead of failing the run.
@@ -480,3 +480,61 @@ $ LCM_LIVE_INTEGRATION=1 bun test test/native-replay.integration.test.ts
 Live runs still finish with the internal budget intact: full model quality
 and `lastNativeReplayStatus preserved` are asserted by the integration
 suite and pass.
+
+# Verification log — Concurrent provider-native replay (2026-08-01, GAP-013)
+
+Package: `omp-lcm-inspired-compaction` 0.2.4 (unreleased delta; OMP 17.2.3)
+
+## Change
+
+Provider-native replay previously ran only after the textual LCM path
+completed (leaf summaries, DAG condensation), so eligible compactions paid
+both latencies serially. It now starts immediately after raw capture and
+runs concurrently with the leaf/root stages under the same absolute internal
+deadline and cancellation signal (`src/controller.ts` `runNativeReplay`;
+the branch is started before tier resolution and awaited only after a
+successful DAG build). The textual LCM result stays authoritative: replay
+failure or internal-deadline expiry is fail-isolated, records
+`lastNativeReplayStatus`/`lastNativeReplayError`/`lastDeadlineStage`, and
+never invalidates a completed textual compaction. The pre-start reserve
+guard remains: if capture itself consumed the deadline budget, replay is
+skipped with the recorded reason instead of starting an already-expired call.
+
+## Regression evidence (test-first)
+
+`test/controller.test.ts`:
+
+- New ordering test: the leaf summary waits on a promise barrier only the
+  replay request resolves, so a sequential implementation deadlocks and
+  times out. The replay request is asserted to precede the leaf summary, and
+  the merged preserve data carries `openaiRemoteCompaction` with status
+  `preserved`.
+- The existing never-settling `nativeCompact` test still passes: the
+  concurrently started replay is bounded by the total deadline and the run
+  completes successfully with replay recorded as failed ("internal deadline
+  reached").
+
+`test/controller-deadline.test.ts` (frozen wall-clock contract, no fake
+clocks): the reserve-guard test now consumes the deadline budget inside
+capture (1.25 s of the 1.4 s injected budget), asserting the remote call is
+never made, replay status is `failed` with "internal deadline reached", and
+`lastDeadlineStage` is `native-replay`. The former "skip when the leaf/root
+stages exhausted the reserve" test was replaced: with concurrent scheduling
+that scenario no longer skips — replay starts at handler start and is
+bounded by the total deadline instead.
+
+## Final state
+
+```text
+$ bun run typecheck      # clean
+$ bun test               # 225 pass, 3 skip, 0 fail (1112 expects)
+$ bunx biome check src/controller.ts test/controller.test.ts \
+    test/controller-deadline.test.ts
+                         # clean apart from pre-existing legacy `any` sites
+                         # present on HEAD
+```
+
+Wall-time latency of an eligible compaction is now approximately
+`max(leaf/DAG, native replay)` instead of `leaf/DAG + native replay`;
+deferred compaction execution (GAP-017) still requires public OMP lifecycle
+APIs and remains out of scope.

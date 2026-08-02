@@ -97,7 +97,9 @@ replay is a bonus, not a dependency.
    DAG to at most 4 roots, writing each raw artifact immediately before its
    leaf node (abort-safe: a signal check between every write).
 6. **Native replay** — the OpenAI v1/v2 remote compaction, deadline-gated
-   and lineage-gated.
+   and lineage-gated. It starts right after capture, concurrently with the
+   leaf/root stages, so the remote round-trip overlaps the textual LCM work
+   (GAP-013); the textual result stays authoritative.
 7. **Render** — produce the final OMP result: `context-full` (complete
    replacement context) or `snapcompact` (vision-model frame summaries),
    degrading snapcompact to context-full only under deadline pressure.
@@ -164,14 +166,14 @@ id semantics.
   OpenAI-Codex credentials, typecheck status) is kept in `VERIFICATION.md`;
   run `bun test` and `bun run test:integration` to reproduce it.
 - Every P0/P1 gap is closed or explicitly accepted with a written
-  disposition. Documented non-goals: no async soft-threshold compaction, no
-  artifact transactions or orphan GC (blocked on public OMP APIs), raw
-  artifacts are plaintext at rest, and the deterministic fallback preserves
-  bytes rather than semantics.
+  disposition. Documented non-goals: no deferred compaction execution
+  (GAP-017), no artifact transactions or orphan GC (blocked on public OMP
+  APIs), raw artifacts are plaintext at rest, and the deterministic fallback
+  preserves bytes rather than semantics.
 - Release note: the marketplace resolves from git tags; `v0.2.4` is the
   latest published release (Part II deadline-safe tiers, Part IV reliability
   hardening, Part V orphan-window hardening + release canary, and the
-  GAP-032 fix that keeps the whole compaction handler inside OMP's 30s
+  GAP-034 fix that keeps the whole compaction handler inside OMP's 30s
   extension-handler wall).
 
 ## Install and enable
@@ -360,9 +362,11 @@ order-preserving results; a leaf node may reference multiple raw artifacts.
 The internal total deadline (default 24s) splits into a leaf stage (~58%), a
 root stage, and a replay/render reserve; individual model calls time out at 9s.
 Expired model work degrades to deterministic archival summaries, never to OMP
-built-in compaction, and user cancellation still cancels. When the deadline
-reserve is reached, native replay is skipped and snapcompact rendering may
-degrade to context-full roots; status records the reason.
+built-in compaction, and user cancellation still cancels. Provider-native
+replay starts right after capture — concurrently with leaf summarization and
+DAG construction (GAP-013) — and shares the same absolute deadline; when the
+deadline reserve is reached it is skipped (or aborted mid-flight), snapcompact
+rendering may degrade to context-full roots, and status records the reason.
 
 In addition to the existing fields, `/lcm status` now reports:
 
@@ -475,4 +479,4 @@ the exception, not the rule; the canary is the gate.
 
 ## Limitations
 
-The standalone extension cannot provide asynchronous soft-threshold compaction, atomic multi-artifact transactions, globally unique IDs across sessions, automatic pre-handoff injection, or shake-region callbacks. Partial artifact writes may orphan artifacts, but no node or preserve state is installed unless all referenced writes succeed.
+The standalone extension cannot provide deferred compaction execution, atomic multi-artifact transactions, globally unique IDs across sessions, automatic pre-handoff injection, or shake-region callbacks. Partial artifact writes may orphan artifacts, but no node or preserve state is installed unless all referenced writes succeed.

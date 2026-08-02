@@ -62,7 +62,8 @@
 ### Remaining work
 
 1. **Open gaps** — each registered with a disposition in the "Gap
-   disposition" section (rolled in from `GAPS.txt`): P1 GAP-008–015,
+   disposition" section (rolled in from `GAPS.txt`): P1 GAP-008–015
+   (GAP-013 closed 2026-08-01 by the concurrent-replay work),
    P2 GAP-017–026, P3 GAP-028–031. GAP-003/004/005/006/007/016/027/029/031/032
    are closed; GAP-026 is partially closed by the Part II runtime-status
    contract; GAP-021 is partially addressed by Part III Candidate B.
@@ -81,9 +82,14 @@
    showing real use. Old nodes are never rewritten; parsers already tolerate
    absent optional fields.
 4. **Part III explicit non-goals** remain unimplemented by design (LLM-Map/
-   Agentic-Map, scope-reduction guard, async soft-threshold compaction,
-   embedding index, `lcm_expand` sub-agent restriction, capture-time file
-   pipeline).
+   Agentic-Map, scope-reduction guard, deferred compaction
+   execution, embedding index, `lcm_expand` sub-agent restriction,
+   capture-time file pipeline).
+5. **Part VI (implemented 2026-08-01): concurrent provider-native replay** —
+   the replay branch now starts right after raw capture and runs concurrently
+   with leaf summarization and DAG condensation under the same absolute
+   deadline and cancellation signal; failure is fail-isolated and the textual
+   LCM result stays authoritative (GAP-013 closed). See the disposition.
 
 ---
 
@@ -499,7 +505,7 @@ Required invariants:
 
 Unavailable exact-paper features, explicitly out of scope:
 
-- asynchronous soft-threshold compaction;
+- deferred compaction execution;
 - atomic background summary installation;
 - transactional commit spanning several artifact writes and OMP's compaction
   entry;
@@ -1883,12 +1889,12 @@ allows; a wrapper would be bypassable by other delegation paths and would
 constitute monkey-patching, which the standalone boundary forbids. OMP's own
 delegation behavior is outside this plugin's control.
 
-### Do not implement: async soft-threshold compaction and atomic background swap
+### Do not implement: deferred compaction execution and atomic background swap
 
-Requires public OMP lifecycle hooks (soft-threshold trigger, background work
-outside `session_before_compact`, atomic installation) and a transaction API;
-neither exists. Tracked as GAP-017 and GAP-012. Part II is the standalone
-substitute: finish deterministically inside the 30-second handler budget.
+Requires public OMP lifecycle hooks (deferred compaction execution outside
+`session_before_compact`, atomic installation) and a transaction API; neither
+exists. Tracked as GAP-017 and GAP-012. Part II is the standalone substitute:
+finish deterministically inside the 30-second handler budget.
 
 ### Do not implement: embedding index over summaries
 
@@ -2141,9 +2147,14 @@ write leaves zero artifacts; rollback/GC still blocked on a public OMP
 transaction API.
 
 **GAP-013 — Local semantic summarization and native replay are sequential
-(open).** Eligible compactions pay both latencies serially. Disposition:
-candidate follow-on after Part II (run summarization and replay concurrently
-with shared cancellation); explicitly not in Part II's scope.
+(closed).** Eligible compactions previously paid both latencies serially.
+Disposition: CLOSED 2026-08-01 — replay now starts immediately after capture
+and runs concurrently with leaf summarization and DAG condensation under the
+same absolute internal deadline and cancellation signal (src/controller.ts
+`runNativeReplay`); failure is fail-isolated and the textual LCM result stays
+authoritative. Regression coverage: promise-barrier ordering test in
+test/controller.test.ts, reserve-guard test in test/controller-deadline.test.ts,
+and the existing never-settling-replay deadline test.
 
 **GAP-014 — Fail-closed behavior trades continuity for availability (open,
 accepted as default).** Accepted failures return `{ cancel: true }` and never
@@ -2174,7 +2185,7 @@ on codex Spark. See Part IV.
 now emit one bounded notification per run while the textual LCM result still
 completes; no encrypted payload content is included. See Part IV.
 
-**GAP-017 — No asynchronous soft-threshold or background compaction
+**GAP-017 — No deferred compaction execution
 (non-goal, blocked).** Compaction runs synchronously in `session_before_compact`.
 Disposition: requires public OMP lifecycle and transaction APIs; Part III
 "Explicit non-goals" records it as do-not-implement; Part II (finish inside
@@ -2434,8 +2445,8 @@ bounded output and abort-safe degradation (`src/explore.ts`, `src/tools.ts`,
   commitments; Part II lands first.
 - OMP's artifact spill is the large-result storage mechanism; the plugin adds
   no capture-time file pipeline.
-- LLM-Map/Agentic-Map, the scope-reduction delegation guard, async
-  soft-threshold compaction, embedding indexes, the `lcm_expand` sub-agent
+- LLM-Map/Agentic-Map, the scope-reduction delegation guard, deferred
+  compaction execution, embedding indexes, the `lcm_expand` sub-agent
   restriction, and capture-time file handling are out of scope; the reasons
   are recorded in Part III "Explicit non-goals".
 - Tests must be legitimate evidence: no assertion weakening, golden-answer

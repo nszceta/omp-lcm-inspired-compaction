@@ -203,21 +203,29 @@ Status (2026-08-01): Part V mitigation shipped — raw artifacts are written
   write leaves zero artifacts; rollback/GC still blocked on a public OMP
   transaction API.
 
-GAP-013: Local semantic summarization and native replay are sequential
---------------------------------------------------------------------
-Current behavior:
-  The plugin completes raw capture, semantic leaf summaries, DAG condensation,
-  and then the provider-native remote request.
+CLOSED GAP-013: Local semantic summarization and native replay are sequential
+----------------------------------------------------------------------------
+Current behavior (pre-closure):
+  The plugin completed raw capture, semantic leaf summaries, DAG condensation,
+  and then the provider-native remote request. Eligible compactions paid both
+  model costs and their latencies serially.
 
 Why it matters:
   Eligible compactions pay both model costs and their latencies serially. Large
   compactions can block the user substantially longer than either path alone.
 
-Required closure:
-  Run independent local summarization and native remote compaction concurrently
-  after source selection, with shared cancellation and fail-isolated results.
-  Preserve the rule that remote failure cannot invalidate a valid textual LCM
-  result.
+Closure:
+  Provider-native replay now starts immediately after raw capture and runs
+  concurrently with leaf summarization and DAG condensation under the same
+  absolute internal deadline and cancellation signal (src/controller.ts
+  `runNativeReplay`; the replay branch is started before tier resolution and
+  awaited only after a successful DAG build). The textual LCM result remains
+  authoritative: replay failure or internal-deadline expiry is fail-isolated,
+  records `lastNativeReplayStatus`/`lastNativeReplayError`/`lastDeadlineStage`,
+  and never invalidates a completed textual compaction. A regression test
+  asserts replay starts before the leaf stage completes (promise-barrier
+  ordering), and the existing never-settling-replay test still proves the
+  concurrent branch is bounded by the total deadline.
 
 GAP-014: Fail-closed behavior trades continuity for availability
 ---------------------------------------------------------------
@@ -272,19 +280,34 @@ Closure:
   textual LCM result still completes. No encrypted payload content is ever
   included.
 
-GAP-017: No asynchronous soft-threshold or background compaction
----------------------------------------------------------------
+GAP-017: No deferred compaction execution
+-----------------------------------------
 Current behavior:
-  Compaction runs synchronously in the public `session_before_compact` hook.
+  All compaction work must complete inside one synchronous
+  `session_before_compact` handler under OMP's fixed 30 s abort; the plugin
+  degrades (deterministic fallbacks, replay skipped) to stay inside it.
+  Per-turn extension events exist, but spreading summarization across the
+  session is cache-hostile: every background summary call writes fresh cache
+  entries beside the live conversation prefix (capacity behavior is
+  provider-internal) and its batch excerpt is a one-shot input whose entry is
+  never read again.
 
 Why it matters:
-  Work begins only when OMP invokes compaction and blocks that operation. The
-  plugin cannot summarize ahead of the hard context boundary or install a result
-  atomically in the background.
+  The compaction event is the cache-safe zone — the installed compaction
+  rewrites the conversation prefix, so any cache churn during it is free —
+  but the 30 s wall cannot fit the full summary burst for large sessions, so
+  the plugin must either degrade or churn the live cache.
 
 Required closure:
-  Requires public OMP lifecycle and transaction APIs for background planning,
-  cancellation, and atomic installation.
+  Public API for deferred compaction: `session_before_compact` may return a
+  pending job that OMP executes outside the handler wall (supervised — user
+  cancel, session switch, and shutdown abort it; configurable deadline) and
+  installs atomically via a transaction API when complete; the model loop
+  never waits longer than the user's own turn. Cache-neutral metadata
+  (capture plan, chunking — no LLM calls, no context mutation) may be
+  assembled per-turn in the background. Rejected: per-turn incremental
+  summarization (live-cache churn, fragmented leaves) and a soft-threshold
+  prep event (predicts nothing, relocates the same LLM burst).
 
 GAP-018: Handoff, shake, and automatic pre-handoff injection are unsupported
 -------------------------------------------------------------------------
@@ -557,7 +580,7 @@ Status (2026-08-01): CLOSED — Candidate A shipped: `lcm_describe` explore mode
   src/explore.ts and src/tools.ts, covered by test/explore.test.ts and
   test/tools.test.ts. Metadata-only mode performs no model call.
 
-CLOSED GAP-032: OMP's fixed 30s handler wall can abort the compaction hook
+CLOSED GAP-034: OMP's fixed 30s handler wall can abort the compaction hook
 ------------------------------------------------------------------------
 Current behavior (pre-closure):
   OMP's extension runner aborts `session_before_compact` handlers after a
@@ -595,6 +618,40 @@ Status (2026-08-01): CLOSED — `beforeCompact` now creates a prelude deadline
   config loader) fail on the pre-closure code and pass post-closure; the live
   integration suite still completes with model-quality summaries and native
   replay preserved.
+
+GAP-033: Deterministic fallback marker nests across generations
+---------------------------------------------------------------
+Current behavior:
+  `boundedDeterministic` (src/summarize.ts) renders its fallback as
+  `Archived source (deterministic fallback): ${input}` and returns the input
+  verbatim when it fits the token budget. When the condensation input already
+  carries that marker (every resumed session's context contains the previous
+  compaction's rendered summary, labeled `Root N:`), each deterministic level
+  re-wraps it. Observed in a real session (2026-08-01): a 13-leaf archive
+  condensed into seven levels where every level was the full previous level
+  plus one `Archived source (deterministic fallback): Root 1: ` prefix
+  (levels 5-7 carry 5-7 nested markers, each node ~8.2 KB, root bounded only
+  by the 2004-token budget); the installed root's summary opened with seven
+  stacked markers and the next session's retained context inherited them.
+  Root-level model summarization had failed (`Summary completion returned no
+  text content`), so every level took the fallback path.
+
+Why it matters:
+  Each generation grows the summary by one marker layer instead of condensing
+  it; the redundant chain stores the same content seven times; and the marker
+  obscures that no semantic condensation occurred. Content itself is preserved
+  (truncation only trims the tail when over budget), so severity is P3.
+
+Required closure:
+  Strip previously-applied fallback markers (and `Root N:` labels) from the
+  input before wrapping, or dedupe repeated markers, so re-archiving an
+  already-archived summary does not nest; cap marker layers in
+  `boundedDeterministic`; and log when a condensation level degrades to the
+  fallback so repeated deterministic chains are visible in status.
+
+Status (2026-08-01): OPEN — mechanism confirmed in source
+  (src/summarize.ts `boundedDeterministic`); reproduced in the live session
+  archive chain (artifacts 369-375, root 375).
 
 Ranking notes
 -------------
