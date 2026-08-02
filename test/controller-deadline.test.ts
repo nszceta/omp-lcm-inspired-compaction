@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { LcmConfig } from "../src/config.ts";
 import { type CompletionCall, createController } from "../src/controller.ts";
+import { captureRawSource } from "../src/source.ts";
 import {
   artifactStore,
   entry,
@@ -295,7 +296,11 @@ describe("controller deadlines and tiers", () => {
     );
   });
 
-  test("skips provider-native replay when the total deadline reserve is exhausted", async () => {
+  test("skips provider-native replay when capture consumed the deadline reserve", async () => {
+    // Regression for the concurrent-replay start: the reserve guard must still
+    // hold when the deadline budget is already exhausted before the replay
+    // branch could start (here capture itself burns it), so the remote call is
+    // never made and the render reserve is preserved.
     const store = artifactStore();
     const ctx: Record<string, unknown> = {
       cwd: "/tmp",
@@ -310,11 +315,22 @@ describe("controller deadlines and tiers", () => {
       modelRegistry: { getApiKey: async () => "provider-key" },
     };
     let replayCalls = 0;
-    const recorder = completionRecorder((input) =>
-      input.startsWith("Root ") ? 1500 : 200,
-    );
     const controller = createController(ctx, {
-      complete: recorder.complete,
+      summaryCall: async () => "summary",
+      capture: async (
+        event: Parameters<typeof captureRawSource>[0],
+        saveArtifact: Parameters<typeof captureRawSource>[1],
+        options: Parameters<typeof captureRawSource>[2],
+      ) => {
+        // Real wall-clock delay is required here: the guard compares against
+        // the production Deadline (real Date.now()/setTimeout), and this file's
+        // frozen contract bans fake clocks. 1250ms of a 1400ms budget leaves
+        // ~150ms, under the ~233ms replay/render reserve, so the guard must
+        // skip replay; timers fire late rather than early, so the margin is
+        // one-sided and safe.
+        await new Promise<void>((resolve) => setTimeout(resolve, 1_250));
+        return captureRawSource(event, saveArtifact, options);
+      },
       requestNativeCompaction: async () => {
         replayCalls++;
         return {
@@ -330,9 +346,7 @@ describe("controller deadlines and tiers", () => {
       },
       config: { ...DEADLINE_CONFIG },
     });
-    const entries = Array.from({ length: ENTRY_COUNT }, (_, index) =>
-      chunkEntry(`e${index}`),
-    );
+    const startedAt = Date.now();
     const result = await controller.beforeCompact(
       event(
         preparation("keep", {
@@ -341,9 +355,10 @@ describe("controller deadlines and tiers", () => {
           ],
           settings: { strategy: "context-full", remoteEnabled: true },
         }),
-        [...entries, entry("keep")],
+        [entry("old", "source detail ".repeat(20)), entry("keep")],
       ),
     );
+    const elapsed = Date.now() - startedAt;
     expect(replayCalls).toBe(0);
     expect(result.compaction).toBeDefined();
     expect(result.compaction.preserveData.ompLcmArtifactsV1).toBeDefined();
@@ -351,12 +366,9 @@ describe("controller deadlines and tiers", () => {
     expect(controller.status.lastNativeReplayError).toContain(
       "internal deadline reached",
     );
-    // Root condensation now aborts at the internal deadline (it previously ran
-    // past it), so the first deadline-affected stage is "root"; the native
-    // replay skip is downstream of the same expiry. If root calls ever stop
-    // honoring the deadline again, this assertion fails.
-    expect(controller.status.lastDeadlineStage).toBe("root");
-  });
+    expect(controller.status.lastDeadlineStage).toBe("native-replay");
+    expect(elapsed).toBeLessThan(4_000);
+  }, 10_000);
 
   test("runs provider-native replay when the deadline reserve is intact", async () => {
     const store = artifactStore();

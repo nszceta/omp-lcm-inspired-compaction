@@ -4,6 +4,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
   buildOpenAiNativeHistory,
+  type CompactionPreparation,
   defaultConvertToLlm,
   getCompactionV2Endpoint,
   getCompactionV2PreserveData,
@@ -497,6 +498,31 @@ function preservedNativeReplayMechanism(
     : "v1";
 }
 
+const REPLAY_DEADLINE_SKIPPED =
+  "internal deadline reached; native replay skipped";
+
+/** Structural slice of the compaction event the replay branch reads. */
+interface NativeReplayEvent {
+  signal?: AbortSignal;
+  customInstructions?: unknown;
+  branchEntries?: readonly unknown[];
+  preparation: CompactionPreparation;
+}
+
+/**
+ * Result of the provider-native replay branch. The branch is fail-isolated:
+ * it reports its own status/error and never rejects the compaction.
+ */
+interface NativeReplayOutcome {
+  status: NonNullable<LcmRuntimeStatus["lastNativeReplayStatus"]>;
+  preserveData?: Record<string, unknown>;
+  lineage?: NativeReplayLineageV1;
+  provider?: string;
+  itemCount?: number;
+  seeded?: boolean;
+  error?: string;
+}
+
 export function createController(ctx: any, injected: ControllerDeps = {}) {
   const deps = {
     ...injected,
@@ -505,6 +531,152 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
   };
   const status: LcmRuntimeStatus = deps.status ?? {};
   const resolveTier = injected.resolveTier ?? resolveSummaryModel;
+
+  /**
+   * Run the provider-native replay branch. Started concurrently with the
+   * textual LCM path (GAP-013): it reads only capture-independent inputs
+   * (preparation, model, credentials, total deadline) and its result is
+   * merged after a successful DAG build. It never rejects except on user
+   * cancellation, which propagates to the fail-closed outer handler.
+   */
+  const runNativeReplay = async (
+    mechanism: NativeReplayMechanism,
+    total: Deadline,
+    event: NativeReplayEvent,
+  ): Promise<NativeReplayOutcome> => {
+    try {
+      const credential = await resolveNativeReplayCredential(ctx, total.signal);
+      if (!credential) {
+        return {
+          status: "unavailable",
+          error: "No API key for provider-native replay",
+        };
+      }
+      const endpoint =
+        mechanism === "v2" ? getCompactionV2Endpoint(ctx.model) : undefined;
+      if (mechanism === "v2" && !endpoint)
+        throw new Error("OMP V2 compaction endpoint is unavailable");
+      const preferredLineage = createNativeReplayLineage(
+        ctx.model,
+        credential.identity,
+        { mechanism, endpoint },
+      );
+      const v1FallbackLineage =
+        mechanism === "v2"
+          ? createNativeReplayLineage(ctx.model, credential.identity)
+          : undefined;
+      const savedLineage = parseNativeReplayLineage(
+        event.preparation.previousPreserveData,
+      );
+      const previousReplay = nativeReplayData(
+        event.preparation.previousPreserveData,
+      );
+      const compatible =
+        previousReplay !== undefined &&
+        (nativeReplayLineagesMatch(savedLineage, preferredLineage) ||
+          (v1FallbackLineage !== undefined &&
+            nativeReplayLineagesMatch(savedLineage, v1FallbackLineage)));
+      const nativePreparation = {
+        ...event.preparation,
+        previousPreserveData: compatible
+          ? event.preparation.previousPreserveData
+          : withoutNativeReplayPreserveData(
+              event.preparation.previousPreserveData,
+            ),
+      };
+      const instructions =
+        typeof event.customInstructions === "string" &&
+        event.customInstructions.trim()
+          ? event.customInstructions
+          : SUMMARIZATION_SYSTEM_PROMPT;
+      let nativeResult: { preserveData?: Record<string, unknown> };
+      if (deps.requestNativeCompaction && mechanism === "v1") {
+        const convertedMessages = defaultConvertToLlm([
+          ...(nativePreparation.messagesToSummarize ?? []),
+          ...(nativePreparation.turnPrefixMessages ?? []),
+          ...(nativePreparation.recentMessages ?? []),
+        ]);
+        const nativeHistory = buildOpenAiNativeHistory(
+          convertedMessages,
+          ctx.model,
+          compatible ? previousReplay?.replacementHistory : undefined,
+        );
+        const remote = await raceWithSignal(
+          deps.requestNativeCompaction(
+            ctx.model,
+            credential.apiKey,
+            nativeHistory,
+            instructions,
+            total.signal,
+            { sessionId: ctx.sessionManager?.getSessionId?.() },
+          ),
+          total.signal,
+        );
+        nativeResult = {
+          preserveData: withOpenAiRemoteCompactionPreserveData(
+            nativePreparation.previousPreserveData,
+            remote,
+          ),
+        };
+      } else {
+        const compact = deps.nativeCompact ?? runOmpCompaction;
+        nativeResult = await raceWithSignal(
+          compact(
+            nativePreparation,
+            ctx.model,
+            credential.apiKey,
+            instructions,
+            total.signal,
+            {
+              remoteInstructions: instructions,
+              thinkingLevel: activeThinkingLevel(event.branchEntries ?? []),
+              sessionId: ctx.sessionManager?.getSessionId?.(),
+            },
+          ),
+          total.signal,
+        );
+      }
+      const replay = nativeReplayData(nativeResult.preserveData);
+      if (!replay || replay.replacementHistory.length === 0)
+        throw new Error(
+          "OMP native compaction returned no replacement history",
+        );
+      const provider = replay.provider ?? ctx.model.provider;
+      if (provider !== ctx.model.provider)
+        throw new Error("Provider-native replay response provider mismatch");
+      const preserved = nativeResult.preserveData;
+      if (
+        !preserved ||
+        typeof preserved !== "object" ||
+        !("openaiRemoteCompaction" in preserved)
+      )
+        throw new Error("OMP native compaction returned no preserve data");
+      return {
+        status: "preserved",
+        preserveData: {
+          openaiRemoteCompaction: preserved.openaiRemoteCompaction,
+        },
+        provider,
+        itemCount: replay.replacementHistory.length,
+        lineage:
+          preservedNativeReplayMechanism(preserved) === "v2"
+            ? preferredLineage
+            : (v1FallbackLineage ?? preferredLineage),
+        seeded: compatible,
+      };
+    } catch (error) {
+      if (event.signal?.aborted) throw error;
+      if (total?.expired() === true || isDeadlineAbort(error)) {
+        status.lastDeadlineStage ??= "native-replay";
+        notify(deps, `LCM native replay skipped: ${REPLAY_DEADLINE_SKIPPED}`);
+        return { status: "failed", error: REPLAY_DEADLINE_SKIPPED };
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      notify(deps, `LCM native replay failed: ${message.slice(0, 300)}`);
+      return { status: "failed", error: message.slice(0, 300) };
+    }
+  };
+
   const beforeCompact = async (event: any): Promise<any> => {
     let total: Deadline | undefined;
     try {
@@ -594,6 +766,44 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
       const rootDeadline = Deadline.at(total.deadlineAt - replayRenderMs, {
         signal: event.signal,
       });
+      // Provider-native replay is independent of the textual LCM path: start
+      // it now so its remote round-trip overlaps leaf summarization and DAG
+      // construction (GAP-013). The textual LCM result stays authoritative;
+      // replay failure is fail-isolated below and never invalidates a
+      // completed textual compaction.
+      let nativeReplayStatus: NonNullable<
+        LcmRuntimeStatus["lastNativeReplayStatus"]
+      > = "ineligible";
+      let nativeReplayPreserveData: Record<string, unknown> | undefined;
+      let nativeReplayLineage: NativeReplayLineageV1 | undefined;
+      let nativeReplayProvider: string | undefined;
+      let nativeReplayItemCount: number | undefined;
+      let nativeReplaySeeded = false;
+      let nativeReplayError: string | undefined;
+      let nativeReplayOutcome: Promise<NativeReplayOutcome> | undefined;
+      if (settings.remoteEnabled === false) {
+        nativeReplayStatus = "disabled";
+      } else {
+        const mechanism = selectNativeReplayMechanism(ctx.model, settings);
+        if (mechanism === undefined) {
+          nativeReplayStatus = "ineligible";
+        } else if (total.remainingMs() < replayRenderMs) {
+          // Pathological case: capture itself consumed the deadline budget, so
+          // a remote call would start already expired; skip it and keep the
+          // render reserve intact.
+          status.lastDeadlineStage ??= "native-replay";
+          nativeReplayStatus = "failed";
+          nativeReplayError = REPLAY_DEADLINE_SKIPPED;
+          notify(deps, `LCM native replay skipped: ${REPLAY_DEADLINE_SKIPPED}`);
+        } else {
+          const promise = runNativeReplay(mechanism, total, event);
+          // If the textual LCM path fails or the user cancels before this
+          // promise is awaited, the no-op handler keeps any rejection from
+          // surfacing as an unhandled rejection.
+          void promise.catch(() => {});
+          nativeReplayOutcome = promise;
+        }
+      }
       const makeModelCall =
         (
           model: unknown,
@@ -867,176 +1077,15 @@ export function createController(ctx: any, injected: ControllerDeps = {}) {
         // bounded separately via the request signals above.
         signal: event.signal,
       });
-      let nativeReplayStatus: NonNullable<
-        LcmRuntimeStatus["lastNativeReplayStatus"]
-      > = "ineligible";
-      let nativeReplayPreserveData: Record<string, unknown> | undefined;
-      let nativeReplayLineage: NativeReplayLineageV1 | undefined;
-      let nativeReplayProvider: string | undefined;
-      let nativeReplayItemCount: number | undefined;
-      let nativeReplaySeeded = false;
-      let nativeReplayError: string | undefined;
-      if (settings.remoteEnabled === false) {
-        nativeReplayStatus = "disabled";
-      } else {
-        const mechanism = selectNativeReplayMechanism(ctx.model, settings);
-        if (mechanism && total.remainingMs() < replayRenderMs) {
-          status.lastDeadlineStage ??= "native-replay";
-          nativeReplayStatus = "failed";
-          nativeReplayError =
-            "internal deadline reached; native replay skipped";
-          notify(deps, `LCM native replay skipped: ${nativeReplayError}`);
-        } else if (mechanism) {
-          try {
-            const credential = await resolveNativeReplayCredential(
-              ctx,
-              total.signal,
-            );
-            if (!credential) {
-              nativeReplayStatus = "unavailable";
-              nativeReplayError = "No API key for provider-native replay";
-            } else {
-              const endpoint =
-                mechanism === "v2"
-                  ? getCompactionV2Endpoint(ctx.model)
-                  : undefined;
-              if (mechanism === "v2" && !endpoint)
-                throw new Error("OMP V2 compaction endpoint is unavailable");
-              const preferredLineage = createNativeReplayLineage(
-                ctx.model,
-                credential.identity,
-                { mechanism, endpoint },
-              );
-              const v1FallbackLineage =
-                mechanism === "v2"
-                  ? createNativeReplayLineage(ctx.model, credential.identity)
-                  : undefined;
-              const savedLineage = parseNativeReplayLineage(
-                event.preparation.previousPreserveData,
-              );
-              const previousReplay = nativeReplayData(
-                event.preparation.previousPreserveData,
-              );
-              const compatible =
-                previousReplay !== undefined &&
-                (nativeReplayLineagesMatch(savedLineage, preferredLineage) ||
-                  (v1FallbackLineage !== undefined &&
-                    nativeReplayLineagesMatch(
-                      savedLineage,
-                      v1FallbackLineage,
-                    )));
-              nativeReplaySeeded = compatible;
-              const nativePreparation = {
-                ...event.preparation,
-                previousPreserveData: compatible
-                  ? event.preparation.previousPreserveData
-                  : withoutNativeReplayPreserveData(
-                      event.preparation.previousPreserveData,
-                    ),
-              };
-              const instructions =
-                typeof event.customInstructions === "string" &&
-                event.customInstructions.trim()
-                  ? event.customInstructions
-                  : SUMMARIZATION_SYSTEM_PROMPT;
-              let nativeResult: { preserveData?: Record<string, unknown> };
-              if (deps.requestNativeCompaction && mechanism === "v1") {
-                const convertedMessages = defaultConvertToLlm([
-                  ...(nativePreparation.messagesToSummarize ?? []),
-                  ...(nativePreparation.turnPrefixMessages ?? []),
-                  ...(nativePreparation.recentMessages ?? []),
-                ]);
-                const nativeHistory = buildOpenAiNativeHistory(
-                  convertedMessages,
-                  ctx.model,
-                  compatible ? previousReplay?.replacementHistory : undefined,
-                );
-                const remote = await raceWithSignal(
-                  deps.requestNativeCompaction(
-                    ctx.model,
-                    credential.apiKey,
-                    nativeHistory,
-                    instructions,
-                    total.signal,
-                    { sessionId: ctx.sessionManager?.getSessionId?.() },
-                  ),
-                  total.signal,
-                );
-                nativeResult = {
-                  preserveData: withOpenAiRemoteCompactionPreserveData(
-                    nativePreparation.previousPreserveData,
-                    remote,
-                  ),
-                };
-              } else {
-                const compact = deps.nativeCompact ?? runOmpCompaction;
-                nativeResult = await raceWithSignal(
-                  compact(
-                    nativePreparation,
-                    ctx.model,
-                    credential.apiKey,
-                    instructions,
-                    total.signal,
-                    {
-                      remoteInstructions: instructions,
-                      thinkingLevel: activeThinkingLevel(
-                        event.branchEntries ?? [],
-                      ),
-                      sessionId: ctx.sessionManager?.getSessionId?.(),
-                    },
-                  ),
-                  total.signal,
-                );
-              }
-              const replay = nativeReplayData(nativeResult.preserveData);
-              if (!replay || replay.replacementHistory.length === 0)
-                throw new Error(
-                  "OMP native compaction returned no replacement history",
-                );
-              const provider = replay.provider ?? ctx.model.provider;
-              if (provider !== ctx.model.provider)
-                throw new Error(
-                  "Provider-native replay response provider mismatch",
-                );
-              const preserved = nativeResult.preserveData;
-              if (
-                !preserved ||
-                typeof preserved !== "object" ||
-                !("openaiRemoteCompaction" in preserved)
-              )
-                throw new Error(
-                  "OMP native compaction returned no preserve data",
-                );
-              nativeReplayPreserveData = {
-                openaiRemoteCompaction: preserved.openaiRemoteCompaction,
-              };
-              nativeReplayProvider = provider;
-              nativeReplayItemCount = replay.replacementHistory.length;
-              nativeReplayLineage =
-                preservedNativeReplayMechanism(preserved) === "v2"
-                  ? preferredLineage
-                  : (v1FallbackLineage ?? preferredLineage);
-              nativeReplayStatus = "preserved";
-            }
-          } catch (error) {
-            if (event.signal?.aborted) throw error;
-            if (total?.expired() === true || isDeadlineAbort(error)) {
-              status.lastDeadlineStage ??= "native-replay";
-              nativeReplayStatus = "failed";
-              nativeReplayError =
-                "internal deadline reached; native replay skipped";
-              notify(deps, `LCM native replay skipped: ${nativeReplayError}`);
-            } else {
-              nativeReplayStatus = "failed";
-              nativeReplayError =
-                error instanceof Error ? error.message : String(error);
-              notify(
-                deps,
-                `LCM native replay failed: ${nativeReplayError.slice(0, 300)}`,
-              );
-            }
-          }
-        }
+      if (nativeReplayOutcome !== undefined) {
+        const outcome = await nativeReplayOutcome;
+        nativeReplayStatus = outcome.status;
+        nativeReplayPreserveData = outcome.preserveData;
+        nativeReplayLineage = outcome.lineage;
+        nativeReplayProvider = outcome.provider;
+        nativeReplayItemCount = outcome.itemCount;
+        nativeReplaySeeded = outcome.seeded ?? false;
+        nativeReplayError = outcome.error;
       }
       status.lastSnapcompactFrameCount = undefined;
       const degradeToContextFull =

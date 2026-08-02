@@ -347,6 +347,61 @@ describe("controller", () => {
     expect(controller.status.lastDeadlineStage).toBe("native-replay");
     expect(elapsed).toBeLessThan(5_000);
   }, 10_000);
+  test("starts provider-native replay concurrently with leaf summarization", async () => {
+    // GAP-013: replay must begin while the textual LCM path is still running,
+    // not after it completes. The leaf summary waits on a barrier only the
+    // replay request resolves, so a sequential implementation deadlocks here
+    // and times out instead of passing.
+    const c = ctx({
+      id: "gpt-replay",
+      provider: "openai",
+      api: "openai-responses",
+      input: ["text"],
+      contextWindow: 128_000,
+    });
+    const order: string[] = [];
+    let markReplayStarted!: () => void;
+    const replayStarted = new Promise<void>((resolve) => {
+      markReplayStarted = resolve;
+    });
+    const controller = createController(c, {
+      config: { handlerDeadlineMs: 10_000 },
+      summaryCall: async () => {
+        await replayStarted;
+        order.push("leaf-summary");
+        return "summary";
+      },
+      requestNativeCompaction: async () => {
+        order.push("replay-request");
+        markReplayStarted();
+        return {
+          provider: "openai",
+          replacementHistory: [
+            { type: "compaction", encrypted_content: "cipher" },
+          ],
+          compactionItem: {
+            type: "compaction",
+            encrypted_content: "cipher",
+          },
+        };
+      },
+    });
+    const result = await controller.beforeCompact(
+      event(
+        preparation("keep", {
+          messagesToSummarize: [
+            { role: "user", content: "discarded turn", timestamp: 1 },
+          ],
+          settings: { strategy: "context-full", remoteEnabled: true },
+        }),
+        [entry("old", "source detail ".repeat(20)), entry("keep")],
+      ),
+    );
+    expect(result.compaction).toBeDefined();
+    expect(result.compaction.preserveData.openaiRemoteCompaction).toBeDefined();
+    expect(order).toEqual(["replay-request", "leaf-summary"]);
+    expect(controller.status.lastNativeReplayStatus).toBe("preserved");
+  }, 10_000);
   test("plugin settings hang falls back to defaults within the prelude", async () => {
     // Regression: a hanging plugin-settings lookup used to stall the handler
     // before any deadline existed; the prelude must bound it and the run must
